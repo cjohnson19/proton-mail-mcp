@@ -1,9 +1,12 @@
+use std::collections::HashSet;
 use std::net::TcpStream;
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use imap::{
     Session,
     types::{Fetch, Flag, Name, NameAttribute},
 };
+use mailparse::MailHeaderMap;
 use native_tls::TlsStream;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -146,6 +149,8 @@ pub struct GetMessageRequest {
     pub mailbox_name: String,
     /// UID of the message to retrieve
     pub uid: u32,
+    /// Whether to include the raw HTML body in the response (default: false)
+    pub include_html: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -190,6 +195,76 @@ pub struct SearchMessagesRequest {
 pub struct SearchMessagesResponse {
     pub messages: Vec<MessageSummary>,
     pub total_matches: u32,
+}
+
+// --- get_mailbox_status types ---
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetMailboxStatusRequest {
+    /// Name of the mailbox (e.g. "INBOX")
+    pub mailbox_name: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GetMailboxStatusResponse {
+    pub mailbox_name: String,
+    pub messages: u32,
+    pub recent: u32,
+    pub unseen: Option<u32>,
+    pub uid_next: Option<u32>,
+    pub uid_validity: Option<u32>,
+}
+
+// --- get_attachment types ---
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetAttachmentRequest {
+    /// Name of the mailbox containing the message
+    pub mailbox_name: String,
+    /// UID of the message
+    pub uid: u32,
+    /// 0-based attachment index (matches order from get_message)
+    pub attachment_index: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GetAttachmentResponse {
+    pub uid: u32,
+    pub attachment_index: usize,
+    pub filename: Option<String>,
+    pub mime_type: String,
+    pub size_bytes: usize,
+    pub content_base64: String,
+}
+
+// --- list_messages_by_thread types ---
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListMessagesByThreadRequest {
+    /// Name of the mailbox to search
+    pub mailbox_name: String,
+    /// Message-ID header value to find the thread for
+    pub message_id: Option<String>,
+    /// Subject to search for (used if message_id not provided)
+    pub subject: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ThreadMessage {
+    pub uid: u32,
+    pub message_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Option<String>,
+    pub subject: Option<String>,
+    pub from: Vec<String>,
+    pub date: Option<String>,
+    pub flags: Vec<MessageFlag>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ListMessagesByThreadResponse {
+    pub messages: Vec<ThreadMessage>,
+    pub total_in_thread: u32,
 }
 
 // --- Helpers ---
@@ -315,6 +390,50 @@ fn collect_attachments(mail: &mailparse::ParsedMail, attachments: &mut Vec<Attac
     for subpart in &mail.subparts {
         collect_attachments(subpart, attachments);
     }
+}
+
+fn collect_attachment_parts<'a>(
+    mail: &'a mailparse::ParsedMail<'a>,
+    parts: &mut Vec<&'a mailparse::ParsedMail<'a>>,
+) {
+    let disposition = mail.get_content_disposition();
+    let is_attachment = disposition.disposition == mailparse::DispositionType::Attachment
+        || (disposition.disposition != mailparse::DispositionType::Inline
+            && !mail.ctype.mimetype.starts_with("text/")
+            && !mail.ctype.mimetype.starts_with("multipart/")
+            && mail.subparts.is_empty());
+
+    if is_attachment {
+        parts.push(mail);
+    }
+
+    for subpart in &mail.subparts {
+        collect_attachment_parts(subpart, parts);
+    }
+}
+
+fn extract_attachment_by_index(
+    raw: &[u8],
+    index: usize,
+) -> Result<(Option<String>, String, Vec<u8>), String> {
+    let parsed = mailparse::parse_mail(raw).map_err(|e| e.to_string())?;
+    let mut parts = Vec::new();
+    collect_attachment_parts(&parsed, &mut parts);
+
+    let part = parts
+        .get(index)
+        .ok_or_else(|| format!("Attachment index {index} out of range (message has {} attachments)", parts.len()))?;
+
+    let disposition = part.get_content_disposition();
+    let filename = disposition
+        .params
+        .get("filename")
+        .or_else(|| part.ctype.params.get("name"))
+        .cloned();
+    let mime_type = part.ctype.mimetype.clone();
+    let body = part.get_body_raw().map_err(|e| e.to_string())?;
+
+    Ok((filename, mime_type, body))
 }
 
 fn escape_search_string(s: &str) -> String {
@@ -490,7 +609,7 @@ impl EmailClient {
             .unwrap_or_default();
         let flags = fetch.flags().iter().map(MessageFlag::from).collect();
 
-        let (body_text, body_html, attachments) = match fetch.body() {
+        let (mut body_text, body_html, attachments) = match fetch.body() {
             Some(raw) => {
                 let parsed = mailparse::parse_mail(raw).map_err(|e| e.to_string())?;
                 let (text, html) = extract_body_parts(&parsed);
@@ -501,6 +620,14 @@ impl EmailClient {
             None => (None, None, Vec::new()),
         };
 
+        if body_text.is_none()
+            && let Some(ref html) = body_html
+        {
+            body_text = html2text::from_read(html.as_bytes(), 80).ok();
+        }
+
+        let include_html = req.include_html.unwrap_or(false);
+
         Ok(GetMessageResponse {
             uid: req.uid,
             subject,
@@ -510,7 +637,7 @@ impl EmailClient {
             date,
             flags,
             body_text,
-            body_html,
+            body_html: if include_html { body_html } else { None },
             attachments,
         })
     }
@@ -559,6 +686,175 @@ impl EmailClient {
         Ok(SearchMessagesResponse {
             messages,
             total_matches,
+        })
+    }
+
+    pub fn get_mailbox_status(
+        &mut self,
+        req: GetMailboxStatusRequest,
+    ) -> Result<GetMailboxStatusResponse, String> {
+        let mailbox = self
+            .session
+            .examine(&req.mailbox_name)
+            .map_err(|e| e.to_string())?;
+
+        let unseen = self
+            .session
+            .uid_search("UNSEEN")
+            .map(|uids| uids.len() as u32)
+            .ok();
+
+        Ok(GetMailboxStatusResponse {
+            mailbox_name: req.mailbox_name,
+            messages: mailbox.exists,
+            recent: mailbox.recent,
+            unseen,
+            uid_next: mailbox.uid_next,
+            uid_validity: mailbox.uid_validity,
+        })
+    }
+
+    pub fn get_attachment(
+        &mut self,
+        req: GetAttachmentRequest,
+    ) -> Result<GetAttachmentResponse, String> {
+        self.session
+            .examine(&req.mailbox_name)
+            .map_err(|e| e.to_string())?;
+
+        let fetches = self
+            .session
+            .uid_fetch(req.uid.to_string(), "BODY.PEEK[]")
+            .map_err(|e| e.to_string())?;
+
+        let fetch = fetches
+            .iter()
+            .next()
+            .ok_or_else(|| format!("Message with UID {} not found", req.uid))?;
+
+        let raw = fetch
+            .body()
+            .ok_or("Message has no body")?;
+
+        let (filename, mime_type, body) = extract_attachment_by_index(raw, req.attachment_index)?;
+        let size_bytes = body.len();
+        let content_base64 = BASE64.encode(&body);
+
+        Ok(GetAttachmentResponse {
+            uid: req.uid,
+            attachment_index: req.attachment_index,
+            filename,
+            mime_type,
+            size_bytes,
+            content_base64,
+        })
+    }
+
+    pub fn list_messages_by_thread(
+        &mut self,
+        req: ListMessagesByThreadRequest,
+    ) -> Result<ListMessagesByThreadResponse, String> {
+        if req.message_id.is_none() && req.subject.is_none() {
+            return Err("At least one of message_id or subject must be provided".into());
+        }
+
+        self.session
+            .examine(&req.mailbox_name)
+            .map_err(|e| e.to_string())?;
+
+        let mut all_uids = HashSet::new();
+
+        if let Some(ref mid) = req.message_id {
+            let escaped = escape_search_string(mid);
+            let searches = [
+                format!("HEADER Message-ID \"{escaped}\""),
+                format!("HEADER References \"{escaped}\""),
+                format!("HEADER In-Reply-To \"{escaped}\""),
+            ];
+            for query in &searches {
+                if let Ok(uids) = self.session.uid_search(query) {
+                    all_uids.extend(uids);
+                }
+            }
+        }
+
+        if let Some(ref subj) = req.subject {
+            let query = format!("SUBJECT \"{}\"", escape_search_string(subj));
+            if let Ok(uids) = self.session.uid_search(&query) {
+                all_uids.extend(uids);
+            }
+        }
+
+        if all_uids.is_empty() {
+            return Ok(ListMessagesByThreadResponse {
+                messages: Vec::new(),
+                total_in_thread: 0,
+            });
+        }
+
+        let uid_set = all_uids
+            .iter()
+            .map(|u| u.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let fetches = self
+            .session
+            .uid_fetch(uid_set, "(UID ENVELOPE FLAGS BODY.PEEK[HEADER])")
+            .map_err(|e| e.to_string())?;
+
+        let mut messages: Vec<ThreadMessage> = fetches
+            .iter()
+            .filter_map(|fetch| {
+                let uid = fetch.uid?;
+                let envelope = fetch.envelope();
+
+                let subject = envelope.and_then(|e| e.subject).map(decode_rfc2047);
+                let date = envelope
+                    .and_then(|e| e.date)
+                    .map(|d| String::from_utf8_lossy(d).into_owned());
+                let from = envelope
+                    .and_then(|e| e.from.as_ref())
+                    .map(|addrs| {
+                        addrs
+                            .iter()
+                            .map(|a| format_address_parts(a.name, a.mailbox, a.host))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let flags = fetch.flags().iter().map(MessageFlag::from).collect();
+
+                let (message_id, in_reply_to, references) = fetch
+                    .header()
+                    .and_then(|raw| mailparse::parse_headers(raw).ok())
+                    .map(|(headers, _)| {
+                        (
+                            headers.get_first_value("Message-ID"),
+                            headers.get_first_value("In-Reply-To"),
+                            headers.get_first_value("References"),
+                        )
+                    })
+                    .unwrap_or((None, None, None));
+
+                Some(ThreadMessage {
+                    uid,
+                    message_id,
+                    in_reply_to,
+                    references,
+                    subject,
+                    from,
+                    date,
+                    flags,
+                })
+            })
+            .collect();
+
+        messages.sort_by_key(|m| m.uid);
+        let total_in_thread = messages.len() as u32;
+
+        Ok(ListMessagesByThreadResponse {
+            messages,
+            total_in_thread,
         })
     }
 }

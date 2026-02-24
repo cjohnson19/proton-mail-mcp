@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+base64 = "0.22"
+html2text = "0.16"
 imap = { version = "2.4.1", features = ["native-tls"] }
 mailparse = "0.15"
 native-tls = "0.2.18"
