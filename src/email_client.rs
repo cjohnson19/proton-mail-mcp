@@ -80,8 +80,6 @@ impl From<&Name> for MailboxDescription {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ListMailboxesResponse(Vec<MailboxDescription>);
 
-// --- Message types ---
-
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub enum MessageFlag {
     Seen,
@@ -124,8 +122,6 @@ pub struct AttachmentInfo {
     pub mime_type: String,
     pub size_bytes: usize,
 }
-
-// --- Request/Response types ---
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListMessagesRequest {
@@ -197,8 +193,6 @@ pub struct SearchMessagesResponse {
     pub total_matches: u32,
 }
 
-// --- get_mailbox_status types ---
-
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetMailboxStatusRequest {
     /// Name of the mailbox (e.g. "INBOX")
@@ -214,8 +208,6 @@ pub struct GetMailboxStatusResponse {
     pub uid_next: Option<u32>,
     pub uid_validity: Option<u32>,
 }
-
-// --- get_attachment types ---
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetAttachmentRequest {
@@ -236,8 +228,6 @@ pub struct GetAttachmentResponse {
     pub size_bytes: usize,
     pub content_base64: String,
 }
-
-// --- list_messages_by_thread types ---
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListMessagesByThreadRequest {
@@ -267,7 +257,45 @@ pub struct ListMessagesByThreadResponse {
     pub total_in_thread: u32,
 }
 
-// --- Helpers ---
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArchiveMessageRequest {
+    /// Name of the mailbox containing the message (e.g. "INBOX")
+    pub mailbox_name: String,
+    /// UID of the message to archive
+    pub uid: u32,
+    /// Subject of the message (not used for the operation, but shown during tool approval for context)
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub subject: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ArchiveMessageResponse {
+    pub uid: u32,
+    pub source_mailbox: String,
+    pub destination_mailbox: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MoveMessageRequest {
+    /// Name of the mailbox containing the message
+    pub source_mailbox: String,
+    /// Destination mailbox to move the message to (cannot be "Trash")
+    pub destination_mailbox: String,
+    /// UID of the message to move
+    pub uid: u32,
+    /// Subject of the message (not used for the operation, but shown during tool approval for context)
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub subject: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MoveMessageResponse {
+    pub uid: u32,
+    pub source_mailbox: String,
+    pub destination_mailbox: String,
+}
 
 fn decode_rfc2047(raw: &[u8]) -> String {
     let lossy = String::from_utf8_lossy(raw);
@@ -478,8 +506,6 @@ fn build_search_query(req: &SearchMessagesRequest) -> String {
         criteria.join(" ")
     }
 }
-
-// --- EmailClient ---
 
 impl EmailClient {
     pub fn new(domain: &str, port: u16, username: &str, password: &str) -> Result<Self, String> {
@@ -747,6 +773,48 @@ impl EmailClient {
             mime_type,
             size_bytes,
             content_base64,
+        })
+    }
+
+    pub fn archive_message(
+        &mut self,
+        req: ArchiveMessageRequest,
+    ) -> Result<ArchiveMessageResponse, String> {
+        self.session
+            .select(&req.mailbox_name)
+            .map_err(|e| e.to_string())?;
+
+        self.session
+            .uid_mv(req.uid.to_string(), "Archive")
+            .map_err(|e| e.to_string())?;
+
+        Ok(ArchiveMessageResponse {
+            uid: req.uid,
+            source_mailbox: req.mailbox_name,
+            destination_mailbox: "Archive".into(),
+        })
+    }
+
+    pub fn move_message(
+        &mut self,
+        req: MoveMessageRequest,
+    ) -> Result<MoveMessageResponse, String> {
+        if req.destination_mailbox.eq_ignore_ascii_case("trash") {
+            return Err("Moving messages to Trash is not allowed via this tool. Use your email client to delete messages.".into());
+        }
+
+        self.session
+            .select(&req.source_mailbox)
+            .map_err(|e| e.to_string())?;
+
+        self.session
+            .uid_mv(req.uid.to_string(), &req.destination_mailbox)
+            .map_err(|e| e.to_string())?;
+
+        Ok(MoveMessageResponse {
+            uid: req.uid,
+            source_mailbox: req.source_mailbox,
+            destination_mailbox: req.destination_mailbox,
         })
     }
 

@@ -8,8 +8,9 @@ use rmcp::{
 };
 
 use crate::email_client::{
-    EmailClient, GetAttachmentRequest, GetMailboxStatusRequest, GetMessageRequest,
-    ListMessagesByThreadRequest, ListMessagesRequest, SearchMessagesRequest,
+    ArchiveMessageRequest, EmailClient, GetAttachmentRequest, GetMailboxStatusRequest,
+    GetMessageRequest, ListMessagesByThreadRequest, ListMessagesRequest, MoveMessageRequest,
+    SearchMessagesRequest,
 };
 
 #[derive(Clone)]
@@ -137,6 +138,46 @@ impl ProtonMailService {
         let result = tokio::task::spawn_blocking(move || {
             let mut client = client.lock().map_err(|e| e.to_string())?;
             client.get_attachment(req)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {e}"))??;
+
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        title = "Archive Message",
+        description = "Move a message to the Archive mailbox by UID. Requires the source mailbox name and the message UID.",
+        annotations(read_only_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn archive_message(
+        &self,
+        Parameters(req): Parameters<ArchiveMessageRequest>,
+    ) -> Result<String, String> {
+        let client = self.client.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut client = client.lock().map_err(|e| e.to_string())?;
+            client.archive_message(req)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {e}"))??;
+
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        title = "Move Message",
+        description = "Move a message to a different mailbox by UID. Requires the source mailbox, destination mailbox, and message UID. Moving to Trash is blocked to prevent accidental deletion — use your email client for that.",
+        annotations(read_only_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn move_message(
+        &self,
+        Parameters(req): Parameters<MoveMessageRequest>,
+    ) -> Result<String, String> {
+        let client = self.client.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut client = client.lock().map_err(|e| e.to_string())?;
+            client.move_message(req)
         })
         .await
         .map_err(|e| format!("Task join error: {e}"))??;
