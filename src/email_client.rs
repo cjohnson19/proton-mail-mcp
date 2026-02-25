@@ -1,5 +1,5 @@
-use std::net::TcpStream;
 use std::collections::HashSet;
+use std::net::TcpStream;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use imap::{
@@ -10,6 +10,7 @@ use mailparse::MailHeaderMap;
 use native_tls::TlsStream;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, instrument, warn};
 
 #[derive(Debug)]
 pub struct EmailClient {
@@ -514,31 +515,39 @@ fn build_search_query(req: &SearchMessagesRequest) -> String {
 
 impl EmailClient {
     pub fn new(domain: &str, port: u16, username: &str, password: &str) -> Result<Self, String> {
+        debug!(domain, port, "connecting to IMAP server");
         let tls = native_tls::TlsConnector::builder()
             .danger_accept_invalid_certs(true)
             .build()
             .unwrap();
-        let client =
-            imap::connect_starttls((domain, port), domain, &tls).map_err(|e| e.to_string())?;
-        let imap_session = client
-            .login(username, password)
-            .map_err(|e| e.0.to_string())?;
+        let client = imap::connect_starttls((domain, port), domain, &tls).map_err(|e| {
+            warn!(error = %e, "STARTTLS connection failed");
+            e.to_string()
+        })?;
+        let imap_session = client.login(username, password).map_err(|e| {
+            warn!(error = %e.0, "IMAP login failed");
+            e.0.to_string()
+        })?;
+        debug!("IMAP session established");
         Ok(Self {
             session: imap_session,
         })
     }
 
+    #[instrument(skip(self))]
     pub fn list_mailboxes(&mut self) -> Result<ListMailboxesResponse, String> {
         self.session.list(None, Some("*")).map_or_else(
             |e| Err(e.to_string()),
             |r| {
-                Ok(ListMailboxesResponse(
-                    r.iter().map(MailboxDescription::from).collect(),
-                ))
+                let mailboxes: Vec<MailboxDescription> =
+                    r.iter().map(MailboxDescription::from).collect();
+                debug!(count = mailboxes.len(), "listed mailboxes");
+                Ok(ListMailboxesResponse(mailboxes))
             },
         )
     }
 
+    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, limit = req.limit, before_uid = ?req.before_uid))]
     pub fn list_messages(
         &mut self,
         req: ListMessagesRequest,
@@ -549,6 +558,7 @@ impl EmailClient {
             .examine(&req.mailbox_name)
             .map_err(|e| e.to_string())?;
         let total = mailbox.exists;
+        debug!(total, "examined mailbox");
 
         if total == 0 {
             return Ok(ListMessagesResponse {
@@ -580,6 +590,7 @@ impl EmailClient {
         let mut messages = extract_summaries(&fetches);
         messages.sort_by(|a, b| b.uid.cmp(&a.uid));
         messages.truncate(limit as usize);
+        debug!(returned = messages.len(), "fetched messages");
 
         Ok(ListMessagesResponse {
             messages,
@@ -587,6 +598,7 @@ impl EmailClient {
         })
     }
 
+    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = req.uid))]
     pub fn get_message(&mut self, req: GetMessageRequest) -> Result<GetMessageResponse, String> {
         self.session
             .examine(&req.mailbox_name)
@@ -658,6 +670,13 @@ impl EmailClient {
             body_text = html2text::from_read(html.as_bytes(), 80).ok();
         }
 
+        debug!(
+            has_text = body_text.is_some(),
+            has_html = body_html.is_some(),
+            attachment_count = attachments.len(),
+            "fetched message"
+        );
+
         Ok(GetMessageResponse {
             uid: req.uid,
             subject,
@@ -672,6 +691,7 @@ impl EmailClient {
         })
     }
 
+    #[instrument(skip(self), fields(mailbox = %req.mailbox_name))]
     pub fn search_messages(
         &mut self,
         req: SearchMessagesRequest,
@@ -682,8 +702,10 @@ impl EmailClient {
             .map_err(|e| e.to_string())?;
 
         let query = build_search_query(&req);
+        debug!(query = %query, "executing IMAP search");
         let uids = self.session.uid_search(&query).map_err(|e| e.to_string())?;
         let total_matches = uids.len() as u32;
+        debug!(total_matches, "search complete");
 
         if uids.is_empty() {
             return Ok(SearchMessagesResponse {
@@ -716,6 +738,7 @@ impl EmailClient {
         })
     }
 
+    #[instrument(skip(self), fields(mailbox = %req.mailbox_name))]
     pub fn get_mailbox_status(
         &mut self,
         req: GetMailboxStatusRequest,
@@ -731,6 +754,8 @@ impl EmailClient {
             .map(|uids| uids.len() as u32)
             .ok();
 
+        debug!(messages = mailbox.exists, recent = mailbox.recent, "mailbox status");
+
         Ok(GetMailboxStatusResponse {
             mailbox_name: req.mailbox_name,
             messages: mailbox.exists,
@@ -741,6 +766,7 @@ impl EmailClient {
         })
     }
 
+    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = req.uid, index = req.attachment_index))]
     pub fn get_attachment(
         &mut self,
         req: GetAttachmentRequest,
@@ -764,6 +790,7 @@ impl EmailClient {
         let (filename, mime_type, body) = extract_attachment_by_index(raw, req.attachment_index)?;
         let size_bytes = body.len();
         let content_base64 = BASE64.encode(&body);
+        debug!(mime_type = %mime_type, size_bytes, "fetched attachment");
 
         Ok(GetAttachmentResponse {
             uid: req.uid,
@@ -775,6 +802,7 @@ impl EmailClient {
         })
     }
 
+    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = req.uid))]
     pub fn archive_message(
         &mut self,
         req: ArchiveMessageRequest,
@@ -787,6 +815,8 @@ impl EmailClient {
             .uid_mv(req.uid.to_string(), "Archive")
             .map_err(|e| e.to_string())?;
 
+        debug!("message archived");
+
         Ok(ArchiveMessageResponse {
             uid: req.uid,
             source_mailbox: req.mailbox_name,
@@ -794,8 +824,10 @@ impl EmailClient {
         })
     }
 
+    #[instrument(skip(self), fields(source = %req.source_mailbox, destination = %req.destination_mailbox, uid = req.uid))]
     pub fn move_message(&mut self, req: MoveMessageRequest) -> Result<MoveMessageResponse, String> {
         if req.destination_mailbox.eq_ignore_ascii_case("trash") {
+            warn!("blocked move to Trash");
             return Err("Moving messages to Trash is not allowed via this tool. Use your email client to delete messages.".into());
         }
 
@@ -807,6 +839,8 @@ impl EmailClient {
             .uid_mv(req.uid.to_string(), &req.destination_mailbox)
             .map_err(|e| e.to_string())?;
 
+        debug!("message moved");
+
         Ok(MoveMessageResponse {
             uid: req.uid,
             source_mailbox: req.source_mailbox,
@@ -814,11 +848,13 @@ impl EmailClient {
         })
     }
 
+    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, has_message_id = req.message_id.is_some(), has_subject = req.subject.is_some()))]
     pub fn list_messages_by_thread(
         &mut self,
         req: ListMessagesByThreadRequest,
     ) -> Result<ListMessagesByThreadResponse, String> {
         if req.message_id.is_none() && req.subject.is_none() {
+            warn!("neither message_id nor subject provided");
             return Err("At least one of message_id or subject must be provided".into());
         }
 
@@ -915,6 +951,7 @@ impl EmailClient {
 
         messages.sort_by_key(|m| m.uid);
         let total_in_thread = messages.len() as u32;
+        debug!(total_in_thread, "found thread messages");
 
         Ok(ListMessagesByThreadResponse {
             messages,

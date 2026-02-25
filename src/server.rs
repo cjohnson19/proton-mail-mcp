@@ -6,6 +6,7 @@ use rmcp::{
     model::{Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
+use tracing::{error, info};
 
 use crate::email_client::{
     ArchiveMessageRequest, EmailClient, GetAttachmentRequest, GetMailboxStatusRequest,
@@ -34,13 +35,15 @@ impl ProtonMailService {
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn list_mailboxes(&self) -> Result<String, String> {
+        info!("tool.list_mailboxes");
         let client = self.client.clone();
         let result = tokio::task::spawn_blocking(move || {
             let mut client = client.lock().map_err(|e| e.to_string())?;
             client.list_mailboxes()
         })
         .await
-        .map_err(|e| format!("Task join error: {e}"))??;
+        .map_err(|e| { error!(error = %e, "tool.list_mailboxes join error"); format!("Task join error: {e}") })?
+        .map_err(|e| { error!(error = %e, "tool.list_mailboxes failed"); e })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -54,13 +57,15 @@ impl ProtonMailService {
         &self,
         Parameters(req): Parameters<ListMessagesRequest>,
     ) -> Result<String, String> {
+        info!(mailbox = %req.mailbox_name, limit = req.limit, before_uid = ?req.before_uid, "tool.list_messages");
         let client = self.client.clone();
         let result = tokio::task::spawn_blocking(move || {
             let mut client = client.lock().map_err(|e| e.to_string())?;
             client.list_messages(req)
         })
         .await
-        .map_err(|e| format!("Task join error: {e}"))??;
+        .map_err(|e| { error!(error = %e, "tool.list_messages join error"); format!("Task join error: {e}") })?
+        .map_err(|e| { error!(error = %e, "tool.list_messages failed"); e })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -74,13 +79,15 @@ impl ProtonMailService {
         &self,
         Parameters(req): Parameters<GetMessageRequest>,
     ) -> Result<String, String> {
+        info!(mailbox = %req.mailbox_name, uid = req.uid, "tool.get_message");
         let client = self.client.clone();
         let result = tokio::task::spawn_blocking(move || {
             let mut client = client.lock().map_err(|e| e.to_string())?;
             client.get_message(req)
         })
         .await
-        .map_err(|e| format!("Task join error: {e}"))??;
+        .map_err(|e| { error!(error = %e, "tool.get_message join error"); format!("Task join error: {e}") })?
+        .map_err(|e| { error!(error = %e, "tool.get_message failed"); e })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -94,13 +101,15 @@ impl ProtonMailService {
         &self,
         Parameters(req): Parameters<SearchMessagesRequest>,
     ) -> Result<String, String> {
+        info!(mailbox = %req.mailbox_name, "tool.search_messages");
         let client = self.client.clone();
         let result = tokio::task::spawn_blocking(move || {
             let mut client = client.lock().map_err(|e| e.to_string())?;
             client.search_messages(req)
         })
         .await
-        .map_err(|e| format!("Task join error: {e}"))??;
+        .map_err(|e| { error!(error = %e, "tool.search_messages join error"); format!("Task join error: {e}") })?
+        .map_err(|e| { error!(error = %e, "tool.search_messages failed"); e })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -114,13 +123,15 @@ impl ProtonMailService {
         &self,
         Parameters(req): Parameters<GetMailboxStatusRequest>,
     ) -> Result<String, String> {
+        info!(mailbox = %req.mailbox_name, "tool.get_mailbox_status");
         let client = self.client.clone();
         let result = tokio::task::spawn_blocking(move || {
             let mut client = client.lock().map_err(|e| e.to_string())?;
             client.get_mailbox_status(req)
         })
         .await
-        .map_err(|e| format!("Task join error: {e}"))??;
+        .map_err(|e| { error!(error = %e, "tool.get_mailbox_status join error"); format!("Task join error: {e}") })?
+        .map_err(|e| { error!(error = %e, "tool.get_mailbox_status failed"); e })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -134,13 +145,15 @@ impl ProtonMailService {
         &self,
         Parameters(req): Parameters<GetAttachmentRequest>,
     ) -> Result<String, String> {
+        info!(mailbox = %req.mailbox_name, uid = req.uid, index = req.attachment_index, "tool.get_attachment");
         let client = self.client.clone();
         let result = tokio::task::spawn_blocking(move || {
             let mut client = client.lock().map_err(|e| e.to_string())?;
             client.get_attachment(req)
         })
         .await
-        .map_err(|e| format!("Task join error: {e}"))??;
+        .map_err(|e| { error!(error = %e, "tool.get_attachment join error"); format!("Task join error: {e}") })?
+        .map_err(|e| { error!(error = %e, "tool.get_attachment failed"); e })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -148,19 +161,25 @@ impl ProtonMailService {
     #[tool(
         title = "Archive Message",
         description = "Move a message to the Archive mailbox by UID. Requires the source mailbox name and the message UID.",
-        annotations(read_only_hint = false, idempotent_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn archive_message(
         &self,
         Parameters(req): Parameters<ArchiveMessageRequest>,
     ) -> Result<String, String> {
+        info!(mailbox = %req.mailbox_name, uid = req.uid, "tool.archive_message");
         let client = self.client.clone();
         let result = tokio::task::spawn_blocking(move || {
             let mut client = client.lock().map_err(|e| e.to_string())?;
             client.archive_message(req)
         })
         .await
-        .map_err(|e| format!("Task join error: {e}"))??;
+        .map_err(|e| { error!(error = %e, "tool.archive_message join error"); format!("Task join error: {e}") })?
+        .map_err(|e| { error!(error = %e, "tool.archive_message failed"); e })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -168,19 +187,25 @@ impl ProtonMailService {
     #[tool(
         title = "Move Message",
         description = "Move a message to a different mailbox by UID. Requires the source mailbox, destination mailbox, and message UID. Moving to Trash is blocked to prevent accidental deletion — use your email client for that.",
-        annotations(read_only_hint = false, idempotent_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn move_message(
         &self,
         Parameters(req): Parameters<MoveMessageRequest>,
     ) -> Result<String, String> {
+        info!(source = %req.source_mailbox, destination = %req.destination_mailbox, uid = req.uid, "tool.move_message");
         let client = self.client.clone();
         let result = tokio::task::spawn_blocking(move || {
             let mut client = client.lock().map_err(|e| e.to_string())?;
             client.move_message(req)
         })
         .await
-        .map_err(|e| format!("Task join error: {e}"))??;
+        .map_err(|e| { error!(error = %e, "tool.move_message join error"); format!("Task join error: {e}") })?
+        .map_err(|e| { error!(error = %e, "tool.move_message failed"); e })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -194,13 +219,15 @@ impl ProtonMailService {
         &self,
         Parameters(req): Parameters<ListMessagesByThreadRequest>,
     ) -> Result<String, String> {
+        info!(mailbox = %req.mailbox_name, has_message_id = req.message_id.is_some(), has_subject = req.subject.is_some(), "tool.list_messages_by_thread");
         let client = self.client.clone();
         let result = tokio::task::spawn_blocking(move || {
             let mut client = client.lock().map_err(|e| e.to_string())?;
             client.list_messages_by_thread(req)
         })
         .await
-        .map_err(|e| format!("Task join error: {e}"))??;
+        .map_err(|e| { error!(error = %e, "tool.list_messages_by_thread join error"); format!("Task join error: {e}") })?
+        .map_err(|e| { error!(error = %e, "tool.list_messages_by_thread failed"); e })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
