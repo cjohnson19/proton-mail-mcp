@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use std::net::TcpStream;
+use std::collections::HashSet;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use imap::{
@@ -123,12 +123,17 @@ pub struct AttachmentInfo {
     pub size_bytes: usize,
 }
 
+fn default_limit() -> u32 {
+    25
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListMessagesRequest {
     /// Name of the mailbox to list messages from (e.g. "INBOX")
     pub mailbox_name: String,
     /// Maximum number of messages to return (default 25, max 100)
-    pub limit: Option<u32>,
+    #[serde(default = "default_limit")]
+    pub limit: u32,
     /// Return messages with UID less than this value (for pagination)
     pub before_uid: Option<u32>,
 }
@@ -146,7 +151,8 @@ pub struct GetMessageRequest {
     /// UID of the message to retrieve
     pub uid: u32,
     /// Whether to include the raw HTML body in the response (default: false)
-    pub include_html: Option<bool>,
+    #[serde(default)]
+    pub include_html: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -313,9 +319,7 @@ fn format_address_parts(
     let mailbox_str = mailbox
         .map(|m| String::from_utf8_lossy(m))
         .unwrap_or_default();
-    let host_str = host
-        .map(|h| String::from_utf8_lossy(h))
-        .unwrap_or_default();
+    let host_str = host.map(|h| String::from_utf8_lossy(h)).unwrap_or_default();
     let email = format!("{mailbox_str}@{host_str}");
 
     match name {
@@ -338,9 +342,7 @@ fn extract_summaries(fetches: &[Fetch]) -> Vec<MessageSummary> {
             let uid = fetch.uid?;
             let envelope = fetch.envelope();
 
-            let subject = envelope
-                .and_then(|e| e.subject)
-                .map(decode_rfc2047);
+            let subject = envelope.and_then(|e| e.subject).map(decode_rfc2047);
 
             let date = envelope
                 .and_then(|e| e.date)
@@ -448,9 +450,12 @@ fn extract_attachment_by_index(
     let mut parts = Vec::new();
     collect_attachment_parts(&parsed, &mut parts);
 
-    let part = parts
-        .get(index)
-        .ok_or_else(|| format!("Attachment index {index} out of range (message has {} attachments)", parts.len()))?;
+    let part = parts.get(index).ok_or_else(|| {
+        format!(
+            "Attachment index {index} out of range (message has {} attachments)",
+            parts.len()
+        )
+    })?;
 
     let disposition = part.get_content_disposition();
     let filename = disposition
@@ -534,8 +539,11 @@ impl EmailClient {
         )
     }
 
-    pub fn list_messages(&mut self, req: ListMessagesRequest) -> Result<ListMessagesResponse, String> {
-        let limit = req.limit.unwrap_or(25).min(100);
+    pub fn list_messages(
+        &mut self,
+        req: ListMessagesRequest,
+    ) -> Result<ListMessagesResponse, String> {
+        let limit = req.limit.min(100);
         let mailbox = self
             .session
             .examine(&req.mailbox_name)
@@ -594,9 +602,7 @@ impl EmailClient {
             .next()
             .ok_or_else(|| format!("Message with UID {} not found", req.uid))?;
 
-        let envelope = fetch
-            .envelope()
-            .ok_or("Message has no envelope")?;
+        let envelope = fetch.envelope().ok_or("Message has no envelope")?;
 
         let subject = envelope.subject.map(decode_rfc2047);
         let date = envelope
@@ -652,8 +658,6 @@ impl EmailClient {
             body_text = html2text::from_read(html.as_bytes(), 80).ok();
         }
 
-        let include_html = req.include_html.unwrap_or(false);
-
         Ok(GetMessageResponse {
             uid: req.uid,
             subject,
@@ -663,7 +667,7 @@ impl EmailClient {
             date,
             flags,
             body_text,
-            body_html: if include_html { body_html } else { None },
+            body_html: if req.include_html { body_html } else { None },
             attachments,
         })
     }
@@ -678,10 +682,7 @@ impl EmailClient {
             .map_err(|e| e.to_string())?;
 
         let query = build_search_query(&req);
-        let uids = self
-            .session
-            .uid_search(&query)
-            .map_err(|e| e.to_string())?;
+        let uids = self.session.uid_search(&query).map_err(|e| e.to_string())?;
         let total_matches = uids.len() as u32;
 
         if uids.is_empty() {
@@ -758,9 +759,7 @@ impl EmailClient {
             .next()
             .ok_or_else(|| format!("Message with UID {} not found", req.uid))?;
 
-        let raw = fetch
-            .body()
-            .ok_or("Message has no body")?;
+        let raw = fetch.body().ok_or("Message has no body")?;
 
         let (filename, mime_type, body) = extract_attachment_by_index(raw, req.attachment_index)?;
         let size_bytes = body.len();
@@ -795,10 +794,7 @@ impl EmailClient {
         })
     }
 
-    pub fn move_message(
-        &mut self,
-        req: MoveMessageRequest,
-    ) -> Result<MoveMessageResponse, String> {
+    pub fn move_message(&mut self, req: MoveMessageRequest) -> Result<MoveMessageResponse, String> {
         if req.destination_mailbox.eq_ignore_ascii_case("trash") {
             return Err("Moving messages to Trash is not allowed via this tool. Use your email client to delete messages.".into());
         }
