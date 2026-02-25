@@ -23,8 +23,12 @@ pub struct ListMailboxesRequest;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct MailboxDescription {
+    /// Mailbox name
     name: String,
+    /// Mailbox attributes (e.g. NoSelect, NoInferiors)
+    #[schemars(extend("examples" = ["NoSelect", "NoInferiors"]))]
     attributes: Vec<MailboxAttribute>,
+    /// Hierarchy delimiter character
     delimiter: Option<String>,
 }
 
@@ -110,17 +114,26 @@ impl From<&Flag<'_>> for MessageFlag {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct MessageSummary {
+    /// Unique identifier of the message
     pub uid: u32,
+    /// Subject line of the message
     pub subject: Option<String>,
+    /// Sender addresses
     pub from: Vec<String>,
+    /// Date the message was sent
     pub date: Option<String>,
+    /// Message flags (e.g. Seen, Flagged)
+    #[schemars(extend("examples" = ["Seen", "Flagged"]))]
     pub flags: Vec<MessageFlag>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct AttachmentInfo {
+    /// Filename of the attachment, if available
     pub filename: Option<String>,
+    /// MIME type of the attachment
     pub mime_type: String,
+    /// Size of the attachment in bytes
     pub size_bytes: usize,
 }
 
@@ -131,25 +144,32 @@ fn default_limit() -> u32 {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListMessagesRequest {
     /// Name of the mailbox to list messages from (e.g. "INBOX")
+    #[schemars(length(min = 1), example = &"INBOX")]
     pub mailbox_name: String,
     /// Maximum number of messages to return (default 25, max 100)
     #[serde(default = "default_limit")]
+    #[schemars(range(min = 0, max = 100))]
     pub limit: u32,
     /// Return messages with UID less than this value (for pagination)
+    #[schemars(range(min = 1))]
     pub before_uid: Option<u32>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListMessagesResponse {
+    /// List of message summaries
     pub messages: Vec<MessageSummary>,
+    /// Total number of messages in the mailbox
     pub total_in_mailbox: u32,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetMessageRequest {
     /// Name of the mailbox containing the message
+    #[schemars(length(min = 1), example = &"INBOX")]
     pub mailbox_name: String,
     /// UID of the message to retrieve
+    #[schemars(range(min = 1))]
     pub uid: u32,
     /// Whether to include the raw HTML body in the response (default: false)
     #[serde(default)]
@@ -158,21 +178,32 @@ pub struct GetMessageRequest {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GetMessageResponse {
+    /// Unique identifier of the message
     pub uid: u32,
+    /// Subject line
     pub subject: Option<String>,
+    /// Sender addresses
     pub from: Vec<String>,
+    /// Recipient addresses
     pub to: Vec<String>,
+    /// CC addresses
     pub cc: Vec<String>,
+    /// Date the message was sent
     pub date: Option<String>,
+    /// Message flags
     pub flags: Vec<MessageFlag>,
+    /// Plain text body (HTML is auto-converted if no text part exists)
     pub body_text: Option<String>,
+    /// Raw HTML body (only present when include_html is true)
     pub body_html: Option<String>,
+    /// List of attachments
     pub attachments: Vec<AttachmentInfo>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchMessagesRequest {
     /// Name of the mailbox to search
+    #[schemars(length(min = 1), example = &"INBOX")]
     pub mailbox_name: String,
     /// Filter by sender
     pub from: Option<String>,
@@ -183,44 +214,58 @@ pub struct SearchMessagesRequest {
     /// Search message body text
     pub body: Option<String>,
     /// Messages since this date (DD-Mon-YYYY format, e.g. "01-Jan-2024")
+    #[schemars(example = &"01-Jan-2024")]
     pub since: Option<String>,
     /// Messages before this date (DD-Mon-YYYY format, e.g. "31-Dec-2024")
+    #[schemars(example = &"31-Dec-2024")]
     pub before: Option<String>,
     /// Filter by seen/unseen status
     pub seen: Option<bool>,
     /// Filter by flagged status
     pub flagged: Option<bool>,
     /// Maximum number of results (default 25, max 100)
+    #[schemars(range(min = 1, max = 100))]
     pub limit: Option<u32>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SearchMessagesResponse {
+    /// List of matching message summaries
     pub messages: Vec<MessageSummary>,
+    /// Total number of messages matching the search criteria
     pub total_matches: u32,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetMailboxStatusRequest {
     /// Name of the mailbox (e.g. "INBOX")
+    #[schemars(length(min = 1), example = &"INBOX")]
     pub mailbox_name: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GetMailboxStatusResponse {
+    /// Name of the mailbox
     pub mailbox_name: String,
+    /// Total number of messages
     pub messages: u32,
+    /// Number of recent messages
     pub recent: u32,
+    /// Number of unseen messages
     pub unseen: Option<u32>,
+    /// Next UID value to be assigned
     pub uid_next: Option<u32>,
+    /// UID validity value
     pub uid_validity: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetAttachmentRequest {
     /// Name of the mailbox containing the message
+    #[schemars(length(min = 1), example = &"INBOX")]
     pub mailbox_name: String,
     /// UID of the message
+    #[schemars(range(min = 1))]
     pub uid: u32,
     /// 0-based attachment index (matches order from get_message)
     pub attachment_index: usize,
@@ -228,47 +273,66 @@ pub struct GetAttachmentRequest {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GetAttachmentResponse {
+    /// UID of the message containing the attachment
     pub uid: u32,
+    /// Index of the attachment in the message
     pub attachment_index: usize,
+    /// Filename of the attachment, if available
     pub filename: Option<String>,
+    /// MIME type of the attachment
     pub mime_type: String,
+    /// Size of the attachment in bytes
     pub size_bytes: usize,
+    /// Base64-encoded attachment content
     pub content_base64: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListMessagesByThreadRequest {
     /// Name of the mailbox to search
+    #[schemars(length(min = 1), example = &"INBOX")]
     pub mailbox_name: String,
-    /// Message-ID header value to find the thread for
+    /// Message-ID header value to find the thread for (at least one of message_id or subject is required)
     pub message_id: Option<String>,
-    /// Subject to search for (used if message_id not provided)
+    /// Subject to search for (at least one of message_id or subject is required)
     pub subject: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadMessage {
+    /// Unique identifier of the message
     pub uid: u32,
+    /// Message-ID header value
     pub message_id: Option<String>,
+    /// In-Reply-To header value
     pub in_reply_to: Option<String>,
+    /// References header value
     pub references: Option<String>,
+    /// Subject line
     pub subject: Option<String>,
+    /// Sender addresses
     pub from: Vec<String>,
+    /// Date the message was sent
     pub date: Option<String>,
+    /// Message flags
     pub flags: Vec<MessageFlag>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListMessagesByThreadResponse {
+    /// Messages in the thread, sorted by UID
     pub messages: Vec<ThreadMessage>,
+    /// Total number of messages in the thread
     pub total_in_thread: u32,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ArchiveMessageRequest {
     /// Name of the mailbox containing the message (e.g. "INBOX")
+    #[schemars(length(min = 1), example = &"INBOX")]
     pub mailbox_name: String,
     /// UID of the message to archive
+    #[schemars(range(min = 1))]
     pub uid: u32,
     /// Subject of the message (not used for the operation, but shown during tool approval for context)
     #[allow(dead_code)]
@@ -278,18 +342,24 @@ pub struct ArchiveMessageRequest {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ArchiveMessageResponse {
+    /// UID of the archived message
     pub uid: u32,
+    /// Original mailbox the message was in
     pub source_mailbox: String,
+    /// Destination mailbox (Archive)
     pub destination_mailbox: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MoveMessageRequest {
     /// Name of the mailbox containing the message
+    #[schemars(length(min = 1), example = &"INBOX")]
     pub source_mailbox: String,
     /// Destination mailbox to move the message to (cannot be "Trash")
+    #[schemars(length(min = 1), example = &"Archive")]
     pub destination_mailbox: String,
     /// UID of the message to move
+    #[schemars(range(min = 1))]
     pub uid: u32,
     /// Subject of the message (not used for the operation, but shown during tool approval for context)
     #[allow(dead_code)]
@@ -299,8 +369,11 @@ pub struct MoveMessageRequest {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct MoveMessageResponse {
+    /// UID of the moved message
     pub uid: u32,
+    /// Original mailbox
     pub source_mailbox: String,
+    /// Destination mailbox
     pub destination_mailbox: String,
 }
 
@@ -754,7 +827,11 @@ impl EmailClient {
             .map(|uids| uids.len() as u32)
             .ok();
 
-        debug!(messages = mailbox.exists, recent = mailbox.recent, "mailbox status");
+        debug!(
+            messages = mailbox.exists,
+            recent = mailbox.recent,
+            "mailbox status"
+        );
 
         Ok(GetMailboxStatusResponse {
             mailbox_name: req.mailbox_name,
@@ -957,5 +1034,312 @@ impl EmailClient {
             messages,
             total_in_thread,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use schemars::schema_for;
+    use serde_json::Value;
+
+    fn get_property<'a>(schema: &'a Value, field: &str) -> &'a Value {
+        &schema["properties"][field]
+    }
+
+    #[test]
+    fn list_messages_request_schema() {
+        let schema = serde_json::to_value(schema_for!(ListMessagesRequest)).unwrap();
+        let mailbox = get_property(&schema, "mailbox_name");
+        assert_eq!(
+            mailbox["minLength"], 1,
+            "mailbox_name should have minLength"
+        );
+        assert!(
+            mailbox["examples"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("INBOX".into())),
+            "mailbox_name should have INBOX example"
+        );
+        assert_eq!(
+            mailbox["description"],
+            "Name of the mailbox to list messages from (e.g. \"INBOX\")"
+        );
+
+        let limit = get_property(&schema, "limit");
+        assert_eq!(limit["maximum"], 100);
+        assert_eq!(limit["minimum"], 0);
+
+        let before_uid = get_property(&schema, "before_uid");
+        assert_eq!(before_uid["minimum"], 1, "before_uid should have minimum 1");
+        assert_eq!(
+            before_uid["description"],
+            "Return messages with UID less than this value (for pagination)"
+        );
+    }
+
+    #[test]
+    fn get_message_request_schema() {
+        let schema = serde_json::to_value(schema_for!(GetMessageRequest)).unwrap();
+        let mailbox = get_property(&schema, "mailbox_name");
+        assert_eq!(mailbox["minLength"], 1);
+        assert!(
+            mailbox["examples"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("INBOX".into()))
+        );
+
+        let uid = get_property(&schema, "uid");
+        assert_eq!(uid["minimum"], 1, "uid should have minimum 1");
+    }
+
+    #[test]
+    fn search_messages_request_schema() {
+        let schema = serde_json::to_value(schema_for!(SearchMessagesRequest)).unwrap();
+        let mailbox = get_property(&schema, "mailbox_name");
+        assert_eq!(mailbox["minLength"], 1);
+
+        let since = get_property(&schema, "since");
+        assert!(
+            since["examples"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("01-Jan-2024".into())),
+            "since should have date example"
+        );
+
+        let before = get_property(&schema, "before");
+        assert!(
+            before["examples"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("31-Dec-2024".into())),
+            "before should have date example"
+        );
+
+        let limit = get_property(&schema, "limit");
+        assert_eq!(limit["minimum"], 1, "limit minimum should be 1");
+        assert_eq!(limit["maximum"], 100, "limit maximum should be 100");
+    }
+
+    #[test]
+    fn get_mailbox_status_request_schema() {
+        let schema = serde_json::to_value(schema_for!(GetMailboxStatusRequest)).unwrap();
+        let mailbox = get_property(&schema, "mailbox_name");
+        assert_eq!(mailbox["minLength"], 1);
+        assert!(
+            mailbox["examples"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("INBOX".into()))
+        );
+    }
+
+    #[test]
+    fn get_attachment_request_schema() {
+        let schema = serde_json::to_value(schema_for!(GetAttachmentRequest)).unwrap();
+        let mailbox = get_property(&schema, "mailbox_name");
+        assert_eq!(mailbox["minLength"], 1);
+
+        let uid = get_property(&schema, "uid");
+        assert_eq!(uid["minimum"], 1);
+    }
+
+    #[test]
+    fn list_messages_by_thread_request_schema() {
+        let schema = serde_json::to_value(schema_for!(ListMessagesByThreadRequest)).unwrap();
+        let mailbox = get_property(&schema, "mailbox_name");
+        assert_eq!(mailbox["minLength"], 1);
+
+        let mid = get_property(&schema, "message_id");
+        assert!(
+            mid["description"]
+                .as_str()
+                .unwrap()
+                .contains("at least one of"),
+            "message_id description should mention requirement"
+        );
+
+        let subj = get_property(&schema, "subject");
+        assert!(
+            subj["description"]
+                .as_str()
+                .unwrap()
+                .contains("at least one of"),
+            "subject description should mention requirement"
+        );
+    }
+
+    #[test]
+    fn archive_message_request_schema() {
+        let schema = serde_json::to_value(schema_for!(ArchiveMessageRequest)).unwrap();
+        let mailbox = get_property(&schema, "mailbox_name");
+        assert_eq!(mailbox["minLength"], 1);
+
+        let uid = get_property(&schema, "uid");
+        assert_eq!(uid["minimum"], 1);
+    }
+
+    #[test]
+    fn move_message_request_schema() {
+        let schema = serde_json::to_value(schema_for!(MoveMessageRequest)).unwrap();
+        let source = get_property(&schema, "source_mailbox");
+        assert_eq!(source["minLength"], 1);
+        assert!(
+            source["examples"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("INBOX".into()))
+        );
+
+        let dest = get_property(&schema, "destination_mailbox");
+        assert_eq!(dest["minLength"], 1);
+        assert!(
+            dest["examples"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("Archive".into()))
+        );
+
+        let uid = get_property(&schema, "uid");
+        assert_eq!(uid["minimum"], 1);
+    }
+
+    #[test]
+    fn response_structs_have_field_descriptions() {
+        let check_descriptions = |schema: Value, struct_name: &str, fields: &[&str]| {
+            fields.iter().for_each(|field| {
+                let prop = get_property(&schema, field);
+                assert!(
+                    prop.get("description").is_some()
+                        || prop.get("$ref").is_some()
+                        || prop.get("allOf").is_some(),
+                    "{struct_name}.{field} should have a description (or be a $ref)"
+                );
+            });
+        };
+
+        check_descriptions(
+            serde_json::to_value(schema_for!(ListMessagesResponse)).unwrap(),
+            "ListMessagesResponse",
+            &["messages", "total_in_mailbox"],
+        );
+        check_descriptions(
+            serde_json::to_value(schema_for!(GetMessageResponse)).unwrap(),
+            "GetMessageResponse",
+            &[
+                "uid",
+                "subject",
+                "from",
+                "to",
+                "cc",
+                "date",
+                "flags",
+                "body_text",
+                "body_html",
+                "attachments",
+            ],
+        );
+        check_descriptions(
+            serde_json::to_value(schema_for!(SearchMessagesResponse)).unwrap(),
+            "SearchMessagesResponse",
+            &["messages", "total_matches"],
+        );
+        check_descriptions(
+            serde_json::to_value(schema_for!(GetMailboxStatusResponse)).unwrap(),
+            "GetMailboxStatusResponse",
+            &[
+                "mailbox_name",
+                "messages",
+                "recent",
+                "unseen",
+                "uid_next",
+                "uid_validity",
+            ],
+        );
+        check_descriptions(
+            serde_json::to_value(schema_for!(GetAttachmentResponse)).unwrap(),
+            "GetAttachmentResponse",
+            &[
+                "uid",
+                "attachment_index",
+                "filename",
+                "mime_type",
+                "size_bytes",
+                "content_base64",
+            ],
+        );
+        check_descriptions(
+            serde_json::to_value(schema_for!(ListMessagesByThreadResponse)).unwrap(),
+            "ListMessagesByThreadResponse",
+            &["messages", "total_in_thread"],
+        );
+        check_descriptions(
+            serde_json::to_value(schema_for!(ArchiveMessageResponse)).unwrap(),
+            "ArchiveMessageResponse",
+            &["uid", "source_mailbox", "destination_mailbox"],
+        );
+        check_descriptions(
+            serde_json::to_value(schema_for!(MoveMessageResponse)).unwrap(),
+            "MoveMessageResponse",
+            &["uid", "source_mailbox", "destination_mailbox"],
+        );
+    }
+
+    #[test]
+    fn message_summary_has_field_descriptions() {
+        let schema = serde_json::to_value(schema_for!(MessageSummary)).unwrap();
+        ["uid", "subject", "from", "date", "flags"]
+            .iter()
+            .for_each(|field| {
+                let prop = get_property(&schema, field);
+                assert!(
+                    prop.get("description").is_some()
+                        || prop.get("$ref").is_some()
+                        || prop.get("allOf").is_some(),
+                    "MessageSummary.{field} should have a description"
+                );
+            });
+    }
+
+    #[test]
+    fn attachment_info_has_field_descriptions() {
+        let schema = serde_json::to_value(schema_for!(AttachmentInfo)).unwrap();
+        ["filename", "mime_type", "size_bytes"]
+            .iter()
+            .for_each(|field| {
+                let prop = get_property(&schema, field);
+                assert!(
+                    prop.get("description").is_some(),
+                    "AttachmentInfo.{field} should have a description"
+                );
+            });
+    }
+
+    #[test]
+    fn thread_message_has_field_descriptions() {
+        let schema = serde_json::to_value(schema_for!(ThreadMessage)).unwrap();
+        [
+            "uid",
+            "message_id",
+            "in_reply_to",
+            "references",
+            "subject",
+            "from",
+            "date",
+            "flags",
+        ]
+        .iter()
+        .for_each(|field| {
+            let prop = get_property(&schema, field);
+            assert!(
+                prop.get("description").is_some()
+                    || prop.get("$ref").is_some()
+                    || prop.get("allOf").is_some(),
+                "ThreadMessage.{field} should have a description"
+            );
+        });
     }
 }
