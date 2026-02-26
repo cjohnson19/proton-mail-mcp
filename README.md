@@ -38,4 +38,6 @@ MCP server for Proton Mail. Connects via IMAP through [Proton Mail Bridge](https
 | `get_attachment` | Download an attachment (base64-encoded) |
 | `list_messages_by_thread` | Find related messages by Message-ID or subject |
 | `archive_message` | Move a message to Archive |
+| `trash_message` | Move a message to Trash |
 | `move_message` | Move a message to a different mailbox |
+| `mark_as_read` | Mark a message as read or unread |

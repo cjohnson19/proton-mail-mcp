@@ -353,11 +353,33 @@ pub struct ArchiveMessageResponse {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrashMessageRequest {
+    /// Name of the mailbox containing the message (e.g. "INBOX")
+    #[schemars(length(min = 1), example = &"INBOX")]
+    pub source_mailbox: String,
+    /// UID of the message to trash
+    #[schemars(range(min = 1))]
+    pub uid: u32,
+    /// Subject of the message (not used for the operation, but shown during tool approval for context)
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub subject: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TrashMessageResponse {
+    /// UID of the trashed message
+    pub uid: u32,
+    /// Original mailbox the message was in
+    pub source_mailbox: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct MoveMessageRequest {
     /// Name of the mailbox containing the message
     #[schemars(length(min = 1), example = &"INBOX")]
     pub source_mailbox: String,
-    /// Destination mailbox to move the message to (cannot be "Trash")
+    /// Destination mailbox to move the message to (cannot be "Trash" — use trash_message instead)
     #[schemars(length(min = 1), example = &"Archive")]
     pub destination_mailbox: String,
     /// UID of the message to move
@@ -1048,6 +1070,29 @@ impl EmailClient {
         })
     }
 
+    #[instrument(skip(self), fields(source = %req.source_mailbox, uid = req.uid))]
+    pub async fn trash_message(
+        &mut self,
+        req: TrashMessageRequest,
+    ) -> Result<TrashMessageResponse, String> {
+        self.session
+            .select(&req.source_mailbox)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        self.session
+            .uid_mv(req.uid.to_string(), "Trash")
+            .await
+            .map_err(|e| e.to_string())?;
+
+        debug!("message trashed");
+
+        Ok(TrashMessageResponse {
+            uid: req.uid,
+            source_mailbox: req.source_mailbox,
+        })
+    }
+
     #[instrument(skip(self), fields(source = %req.source_mailbox, destination = %req.destination_mailbox, uid = req.uid))]
     pub async fn move_message(
         &mut self,
@@ -1055,7 +1100,7 @@ impl EmailClient {
     ) -> Result<MoveMessageResponse, String> {
         if req.destination_mailbox.eq_ignore_ascii_case("trash") {
             warn!("blocked move to Trash");
-            return Err("Moving messages to Trash is not allowed via this tool. Use your email client to delete messages.".into());
+            return Err("Moving messages to Trash is not allowed via this tool. Use the trash_message tool instead.".into());
         }
 
         self.session

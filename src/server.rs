@@ -12,7 +12,7 @@ use tracing::{error, info};
 use crate::email_client::{
     ArchiveMessageRequest, EmailClient, GetAttachmentRequest, GetMailboxStatusRequest,
     GetMessageRequest, ListMessagesByThreadRequest, ListMessagesRequest, MarkAsReadRequest,
-    MoveMessageRequest, SearchMessagesRequest,
+    MoveMessageRequest, SearchMessagesRequest, TrashMessageRequest,
 };
 
 #[derive(Clone)]
@@ -158,8 +158,30 @@ impl ProtonMailService {
     }
 
     #[tool(
+        title = "Trash Message",
+        description = "Move a message to the Trash mailbox by UID. Requires the source mailbox name and the message UID.",
+        annotations(
+            read_only_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn trash_message(
+        &self,
+        Parameters(req): Parameters<TrashMessageRequest>,
+    ) -> Result<String, String> {
+        info!(source = %req.source_mailbox, uid = req.uid, "tool.trash_message");
+        let mut client = self.client.lock().await;
+        let result = client.trash_message(req).await.map_err(|e| {
+            error!(error = %e, "tool.trash_message failed");
+            e
+        })?;
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
         title = "Move Message",
-        description = "Move a message to a different mailbox by UID. Requires the source mailbox, destination mailbox, and message UID. Moving to Trash is blocked to prevent accidental deletion — use your email client for that.",
+        description = "Move a message to a different mailbox by UID. Requires the source mailbox, destination mailbox, and message UID. Moving to Trash is blocked — use the trash_message tool instead.",
         annotations(
             read_only_hint = false,
             idempotent_hint = false,
@@ -233,9 +255,9 @@ impl ServerHandler for ProtonMailService {
                 "- Read full message content (text auto-extracted from HTML)\n",
                 "- Download attachments (base64-encoded)\n",
                 "- Find conversation threads by Message-ID or subject\n",
-                "- Archive messages, move between mailboxes, mark read/unread\n",
+                "- Archive messages, trash messages, move between mailboxes, mark read/unread\n",
                 "\n",
-                "Cannot: send, reply, draft, delete, or manage mailboxes.\n",
+                "Cannot: send, reply, draft, or manage mailboxes.\n",
                 "\n",
                 "Key conventions:\n",
                 "- Messages are identified by UID + mailbox_name (e.g. \"INBOX\")\n",
