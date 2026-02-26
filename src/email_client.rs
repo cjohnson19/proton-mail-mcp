@@ -827,7 +827,7 @@ impl EmailClient {
         };
 
         let mut messages = extract_summaries(&fetches);
-        messages.sort_by(|a, b| b.uid.cmp(&a.uid));
+        messages.sort_by_key(|a| std::cmp::Reverse(a.uid));
         debug!(returned = messages.len(), "fetched messages");
 
         Ok(ListMessagesResponse {
@@ -1003,7 +1003,7 @@ impl EmailClient {
             .map_err(|e| e.to_string())?;
 
         let mut messages = extract_summaries(&fetches);
-        messages.sort_by(|a, b| b.uid.cmp(&a.uid));
+        messages.sort_by_key(|a| std::cmp::Reverse(a.uid));
 
         Ok(SearchMessagesResponse {
             messages,

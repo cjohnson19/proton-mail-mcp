@@ -19,7 +19,10 @@ async fn test_list_mailboxes() {
         .iter()
         .filter_map(|m| m["name"].as_str())
         .collect();
-    assert!(names.contains(&"INBOX"), "INBOX should be present, got: {names:?}");
+    assert!(
+        names.contains(&"INBOX"),
+        "INBOX should be present, got: {names:?}"
+    );
 }
 
 #[tokio::test]
@@ -209,10 +212,19 @@ async fn test_get_message_html() {
         .await
         .unwrap();
 
-    assert!(resp.body_text.is_some(), "body_text should be auto-converted from HTML");
+    assert!(
+        resp.body_text.is_some(),
+        "body_text should be auto-converted from HTML"
+    );
     let body = resp.body_text.unwrap();
-    assert!(body.contains("Hello"), "converted text should contain 'Hello'");
-    assert!(body.contains("World"), "converted text should contain 'World'");
+    assert!(
+        body.contains("Hello"),
+        "converted text should contain 'Hello'"
+    );
+    assert!(
+        body.contains("World"),
+        "converted text should contain 'World'"
+    );
 }
 
 #[tokio::test]
@@ -266,7 +278,13 @@ async fn test_search_by_from() {
     append_message(
         &mut raw,
         "INBOX",
-        &build_rfc2822_message("specific-sender@example.com", user, "From test", "body", &[]),
+        &build_rfc2822_message(
+            "specific-sender@example.com",
+            user,
+            "From test",
+            "body",
+            &[],
+        ),
     )
     .await;
     append_message(
@@ -295,10 +313,12 @@ async fn test_search_by_from() {
         .unwrap();
 
     assert_eq!(resp.total_matches, 1);
-    assert!(resp.messages[0]
-        .from
-        .iter()
-        .any(|f| f.contains("specific-sender")));
+    assert!(
+        resp.messages[0]
+            .from
+            .iter()
+            .any(|f| f.contains("specific-sender"))
+    );
 }
 
 #[tokio::test]
@@ -435,14 +455,16 @@ async fn test_list_messages_by_thread() {
         .unwrap();
 
     assert_eq!(resp.total_in_thread, 2, "thread should have 2 messages");
-    assert!(resp.messages.iter().any(|m| m
-        .subject
-        .as_deref()
-        .is_some_and(|s| s.contains("Thread subject"))));
-    assert!(resp
-        .messages
-        .iter()
-        .any(|m| m.in_reply_to.as_deref() == Some(msg_id)));
+    assert!(resp.messages.iter().any(|m| {
+        m.subject
+            .as_deref()
+            .is_some_and(|s| s.contains("Thread subject"))
+    }));
+    assert!(
+        resp.messages
+            .iter()
+            .any(|m| m.in_reply_to.as_deref() == Some(msg_id))
+    );
 }
 
 #[tokio::test]

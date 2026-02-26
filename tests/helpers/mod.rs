@@ -57,10 +57,7 @@ pub async fn append_message(
         .expect("IMAP APPEND failed");
 }
 
-pub async fn create_mailbox(
-    session: &mut Session<TlsStream<TcpStream>>,
-    name: &str,
-) {
+pub async fn create_mailbox(session: &mut Session<TlsStream<TcpStream>>, name: &str) {
     session.create(name).await.expect("IMAP CREATE failed");
 }
 
@@ -79,19 +76,19 @@ pub fn build_rfc2822_message(
     for (key, value) in extras {
         headers.push_str(&format!("{key}: {value}\r\n"));
     }
-    if !extras.iter().any(|(k, _)| k.eq_ignore_ascii_case("Content-Type")) {
+    if !extras
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
+    {
         headers.push_str("Content-Type: text/plain; charset=utf-8\r\n");
     }
-    headers.push_str(&format!("Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\r\n{body}"));
+    headers.push_str(&format!(
+        "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\r\n{body}"
+    ));
     headers.into_bytes()
 }
 
-pub fn build_html_message(
-    from: &str,
-    to: &str,
-    subject: &str,
-    html_body: &str,
-) -> Vec<u8> {
+pub fn build_html_message(from: &str, to: &str, subject: &str, html_body: &str) -> Vec<u8> {
     format!(
         "From: {from}\r\n\
          To: {to}\r\n\
