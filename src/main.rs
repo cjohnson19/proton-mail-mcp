@@ -36,10 +36,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     info!("Connecting to Proton Mail Bridge at {hostname}:{port}");
-    let client = EmailClient::new(&hostname, port, &username, &password).map_err(|e| {
-        error!(error = %e, "failed to connect to IMAP server");
-        e
-    })?;
+    let client = EmailClient::new(&hostname, port, &username, &password)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "failed to connect to IMAP server");
+            e
+        })?;
     info!("Connected successfully");
 
     let service = ProtonMailService::new(client);

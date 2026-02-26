@@ -1,15 +1,16 @@
 use std::collections::HashSet;
-use std::net::TcpStream;
 
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use imap::{
+use async_imap::{
     Session,
     types::{Fetch, Flag, Name, NameAttribute},
 };
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use futures::TryStreamExt;
 use mailparse::MailHeaderMap;
-use native_tls::TlsStream;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::net::TcpStream;
+use tokio_native_tls::TlsStream;
 use tracing::{debug, instrument, warn};
 
 #[derive(Debug)]
@@ -62,7 +63,8 @@ impl From<NameAttribute<'_>> for MailboxAttribute {
             NameAttribute::NoSelect => Self::NoSelect,
             NameAttribute::Marked => Self::Marked,
             NameAttribute::Unmarked => Self::Unmarked,
-            NameAttribute::Custom(cow) => Self::Custom(cow.to_string()),
+            NameAttribute::Extension(cow) => Self::Custom(cow.to_string()),
+            other => Self::Custom(format!("{other:?}")),
         }
     }
 }
@@ -443,10 +445,12 @@ fn extract_summaries(fetches: &[Fetch]) -> Vec<MessageSummary> {
             let uid = fetch.uid?;
             let envelope = fetch.envelope();
 
-            let subject = envelope.and_then(|e| e.subject).map(decode_rfc2047);
+            let subject = envelope
+                .and_then(|e| e.subject.as_deref())
+                .map(decode_rfc2047);
 
             let date = envelope
-                .and_then(|e| e.date)
+                .and_then(|e| e.date.as_deref())
                 .map(|d| String::from_utf8_lossy(d).into_owned());
 
             let from = envelope
@@ -454,12 +458,18 @@ fn extract_summaries(fetches: &[Fetch]) -> Vec<MessageSummary> {
                 .map(|addrs| {
                     addrs
                         .iter()
-                        .map(|a| format_address_parts(a.name, a.mailbox, a.host))
+                        .map(|a| {
+                            format_address_parts(
+                                a.name.as_deref(),
+                                a.mailbox.as_deref(),
+                                a.host.as_deref(),
+                            )
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
 
-            let flags = fetch.flags().iter().map(MessageFlag::from).collect();
+            let flags = fetch.flags().map(|f| MessageFlag::from(&f)).collect();
 
             Some(MessageSummary {
                 uid,
@@ -614,17 +624,50 @@ fn build_search_query(req: &SearchMessagesRequest) -> String {
 }
 
 impl EmailClient {
-    pub fn new(domain: &str, port: u16, username: &str, password: &str) -> Result<Self, String> {
+    pub async fn new(
+        domain: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+    ) -> Result<Self, String> {
         debug!(domain, port, "connecting to IMAP server");
-        let tls = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .unwrap();
-        let client = imap::connect_starttls((domain, port), domain, &tls).map_err(|e| {
-            warn!(error = %e, "STARTTLS connection failed");
+
+        let tcp_stream = TcpStream::connect((domain, port)).await.map_err(|e| {
+            warn!(error = %e, "TCP connection failed");
             e.to_string()
         })?;
-        let imap_session = client.login(username, password).map_err(|e| {
+
+        let mut client = async_imap::Client::new(tcp_stream);
+        client
+            .read_response()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("no server greeting")?;
+        client
+            .run_command_and_check_ok("STARTTLS", None)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "STARTTLS command failed");
+                e.to_string()
+            })?;
+
+        let tcp_stream = client.into_inner();
+
+        let tls_connector = native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .map_err(|e| e.to_string())?;
+        let tls_connector = tokio_native_tls::TlsConnector::from(tls_connector);
+        let tls_stream: TlsStream<TcpStream> = tls_connector
+            .connect(domain, tcp_stream)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "TLS upgrade failed");
+                e.to_string()
+            })?;
+
+        let client = async_imap::Client::new(tls_stream);
+        let imap_session = client.login(username, password).await.map_err(|e| {
             warn!(error = %e.0, "IMAP login failed");
             e.0.to_string()
         })?;
@@ -635,20 +678,23 @@ impl EmailClient {
     }
 
     #[instrument(skip(self))]
-    pub fn list_mailboxes(&mut self) -> Result<ListMailboxesResponse, String> {
-        self.session.list(None, Some("*")).map_or_else(
-            |e| Err(e.to_string()),
-            |r| {
-                let mailboxes: Vec<MailboxDescription> =
-                    r.iter().map(MailboxDescription::from).collect();
-                debug!(count = mailboxes.len(), "listed mailboxes");
-                Ok(ListMailboxesResponse(mailboxes))
-            },
-        )
+    pub async fn list_mailboxes(&mut self) -> Result<ListMailboxesResponse, String> {
+        let names: Vec<Name> = self
+            .session
+            .list(None, Some("*"))
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect()
+            .await
+            .map_err(|e| e.to_string())?;
+        let mailboxes: Vec<MailboxDescription> =
+            names.iter().map(MailboxDescription::from).collect();
+        debug!(count = mailboxes.len(), "listed mailboxes");
+        Ok(ListMailboxesResponse(mailboxes))
     }
 
     #[instrument(skip(self), fields(mailbox = %req.mailbox_name, limit = req.limit, before_uid = ?req.before_uid))]
-    pub fn list_messages(
+    pub async fn list_messages(
         &mut self,
         req: ListMessagesRequest,
     ) -> Result<ListMessagesResponse, String> {
@@ -656,6 +702,7 @@ impl EmailClient {
         let mailbox = self
             .session
             .examine(&req.mailbox_name)
+            .await
             .map_err(|e| e.to_string())?;
         let total = mailbox.exists;
         debug!(total, "examined mailbox");
@@ -667,7 +714,7 @@ impl EmailClient {
             });
         }
 
-        let fetches = match req.before_uid {
+        let fetches: Vec<Fetch> = match req.before_uid {
             Some(before_uid) => {
                 if before_uid <= 1 {
                     return Ok(ListMessagesResponse {
@@ -678,6 +725,7 @@ impl EmailClient {
                 let uids = self
                     .session
                     .uid_search(format!("UID 1:{}", before_uid - 1))
+                    .await
                     .map_err(|e| e.to_string())?;
 
                 if uids.is_empty() {
@@ -699,12 +747,20 @@ impl EmailClient {
 
                 self.session
                     .uid_fetch(uid_set, "(UID ENVELOPE FLAGS)")
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .try_collect()
+                    .await
                     .map_err(|e| e.to_string())?
             }
             None => {
                 let start = total.saturating_sub(limit).saturating_add(1);
                 self.session
                     .fetch(format!("{start}:{total}"), "(UID ENVELOPE FLAGS)")
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .try_collect()
+                    .await
                     .map_err(|e| e.to_string())?
             }
         };
@@ -720,26 +776,34 @@ impl EmailClient {
     }
 
     #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = req.uid))]
-    pub fn get_message(&mut self, req: GetMessageRequest) -> Result<GetMessageResponse, String> {
+    pub async fn get_message(
+        &mut self,
+        req: GetMessageRequest,
+    ) -> Result<GetMessageResponse, String> {
         self.session
             .examine(&req.mailbox_name)
+            .await
             .map_err(|e| e.to_string())?;
 
-        let fetches = self
+        let fetches: Vec<Fetch> = self
             .session
             .uid_fetch(req.uid.to_string(), "(UID ENVELOPE FLAGS BODY.PEEK[])")
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect()
+            .await
             .map_err(|e| e.to_string())?;
 
         let fetch = fetches
-            .iter()
-            .next()
+            .first()
             .ok_or_else(|| format!("Message with UID {} not found", req.uid))?;
 
         let envelope = fetch.envelope().ok_or("Message has no envelope")?;
 
-        let subject = envelope.subject.map(decode_rfc2047);
+        let subject = envelope.subject.as_ref().map(|s| decode_rfc2047(s));
         let date = envelope
             .date
+            .as_ref()
             .map(|d| String::from_utf8_lossy(d).into_owned());
 
         let from: Vec<String> = envelope
@@ -748,7 +812,13 @@ impl EmailClient {
             .map(|addrs| {
                 addrs
                     .iter()
-                    .map(|a| format_address_parts(a.name, a.mailbox, a.host))
+                    .map(|a| {
+                        format_address_parts(
+                            a.name.as_deref(),
+                            a.mailbox.as_deref(),
+                            a.host.as_deref(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -758,7 +828,13 @@ impl EmailClient {
             .map(|addrs| {
                 addrs
                     .iter()
-                    .map(|a| format_address_parts(a.name, a.mailbox, a.host))
+                    .map(|a| {
+                        format_address_parts(
+                            a.name.as_deref(),
+                            a.mailbox.as_deref(),
+                            a.host.as_deref(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -768,11 +844,17 @@ impl EmailClient {
             .map(|addrs| {
                 addrs
                     .iter()
-                    .map(|a| format_address_parts(a.name, a.mailbox, a.host))
+                    .map(|a| {
+                        format_address_parts(
+                            a.name.as_deref(),
+                            a.mailbox.as_deref(),
+                            a.host.as_deref(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
-        let flags = fetch.flags().iter().map(MessageFlag::from).collect();
+        let flags = fetch.flags().map(|f| MessageFlag::from(&f)).collect();
 
         let (mut body_text, body_html, attachments) = match fetch.body() {
             Some(raw) => {
@@ -813,18 +895,23 @@ impl EmailClient {
     }
 
     #[instrument(skip(self), fields(mailbox = %req.mailbox_name))]
-    pub fn search_messages(
+    pub async fn search_messages(
         &mut self,
         req: SearchMessagesRequest,
     ) -> Result<SearchMessagesResponse, String> {
         let limit = req.limit.unwrap_or(25).min(100);
         self.session
             .examine(&req.mailbox_name)
+            .await
             .map_err(|e| e.to_string())?;
 
         let query = build_search_query(&req);
         debug!(query = %query, "executing IMAP search");
-        let uids = self.session.uid_search(&query).map_err(|e| e.to_string())?;
+        let uids = self
+            .session
+            .uid_search(&query)
+            .await
+            .map_err(|e| e.to_string())?;
         let total_matches = uids.len() as u32;
         debug!(total_matches, "search complete");
 
@@ -845,9 +932,13 @@ impl EmailClient {
             .collect::<Vec<_>>()
             .join(",");
 
-        let fetches = self
+        let fetches: Vec<Fetch> = self
             .session
             .uid_fetch(uid_set, "(UID ENVELOPE FLAGS)")
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect()
+            .await
             .map_err(|e| e.to_string())?;
 
         let mut messages = extract_summaries(&fetches);
@@ -860,18 +951,20 @@ impl EmailClient {
     }
 
     #[instrument(skip(self), fields(mailbox = %req.mailbox_name))]
-    pub fn get_mailbox_status(
+    pub async fn get_mailbox_status(
         &mut self,
         req: GetMailboxStatusRequest,
     ) -> Result<GetMailboxStatusResponse, String> {
         let mailbox = self
             .session
             .examine(&req.mailbox_name)
+            .await
             .map_err(|e| e.to_string())?;
 
         let unseen = self
             .session
             .uid_search("UNSEEN")
+            .await
             .map(|uids| uids.len() as u32)
             .ok();
 
@@ -892,22 +985,26 @@ impl EmailClient {
     }
 
     #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = req.uid, index = req.attachment_index))]
-    pub fn get_attachment(
+    pub async fn get_attachment(
         &mut self,
         req: GetAttachmentRequest,
     ) -> Result<GetAttachmentResponse, String> {
         self.session
             .examine(&req.mailbox_name)
+            .await
             .map_err(|e| e.to_string())?;
 
-        let fetches = self
+        let fetches: Vec<Fetch> = self
             .session
             .uid_fetch(req.uid.to_string(), "BODY.PEEK[]")
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect()
+            .await
             .map_err(|e| e.to_string())?;
 
         let fetch = fetches
-            .iter()
-            .next()
+            .first()
             .ok_or_else(|| format!("Message with UID {} not found", req.uid))?;
 
         let raw = fetch.body().ok_or("Message has no body")?;
@@ -928,16 +1025,18 @@ impl EmailClient {
     }
 
     #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = req.uid))]
-    pub fn archive_message(
+    pub async fn archive_message(
         &mut self,
         req: ArchiveMessageRequest,
     ) -> Result<ArchiveMessageResponse, String> {
         self.session
             .select(&req.mailbox_name)
+            .await
             .map_err(|e| e.to_string())?;
 
         self.session
             .uid_mv(req.uid.to_string(), "Archive")
+            .await
             .map_err(|e| e.to_string())?;
 
         debug!("message archived");
@@ -950,7 +1049,10 @@ impl EmailClient {
     }
 
     #[instrument(skip(self), fields(source = %req.source_mailbox, destination = %req.destination_mailbox, uid = req.uid))]
-    pub fn move_message(&mut self, req: MoveMessageRequest) -> Result<MoveMessageResponse, String> {
+    pub async fn move_message(
+        &mut self,
+        req: MoveMessageRequest,
+    ) -> Result<MoveMessageResponse, String> {
         if req.destination_mailbox.eq_ignore_ascii_case("trash") {
             warn!("blocked move to Trash");
             return Err("Moving messages to Trash is not allowed via this tool. Use your email client to delete messages.".into());
@@ -958,10 +1060,12 @@ impl EmailClient {
 
         self.session
             .select(&req.source_mailbox)
+            .await
             .map_err(|e| e.to_string())?;
 
         self.session
             .uid_mv(req.uid.to_string(), &req.destination_mailbox)
+            .await
             .map_err(|e| e.to_string())?;
 
         debug!("message moved");
@@ -974,14 +1078,22 @@ impl EmailClient {
     }
 
     #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = req.uid, read = req.read))]
-    pub fn mark_as_read(&mut self, req: MarkAsReadRequest) -> Result<MarkAsReadResponse, String> {
+    pub async fn mark_as_read(
+        &mut self,
+        req: MarkAsReadRequest,
+    ) -> Result<MarkAsReadResponse, String> {
         self.session
             .select(&req.mailbox_name)
+            .await
             .map_err(|e| e.to_string())?;
 
         let flag_op = if req.read { "+FLAGS" } else { "-FLAGS" };
         self.session
             .uid_store(req.uid.to_string(), format!("{flag_op} (\\Seen)"))
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
             .map_err(|e| e.to_string())?;
 
         debug!(
@@ -997,7 +1109,7 @@ impl EmailClient {
     }
 
     #[instrument(skip(self), fields(mailbox = %req.mailbox_name, has_message_id = req.message_id.is_some(), has_subject = req.subject.is_some()))]
-    pub fn list_messages_by_thread(
+    pub async fn list_messages_by_thread(
         &mut self,
         req: ListMessagesByThreadRequest,
     ) -> Result<ListMessagesByThreadResponse, String> {
@@ -1008,6 +1120,7 @@ impl EmailClient {
 
         self.session
             .examine(&req.mailbox_name)
+            .await
             .map_err(|e| e.to_string())?;
 
         let mut all_uids = HashSet::new();
@@ -1020,7 +1133,7 @@ impl EmailClient {
                 format!("HEADER In-Reply-To \"{escaped}\""),
             ];
             for query in &searches {
-                if let Ok(uids) = self.session.uid_search(query) {
+                if let Ok(uids) = self.session.uid_search(query).await {
                     all_uids.extend(uids);
                 }
             }
@@ -1028,7 +1141,7 @@ impl EmailClient {
 
         if let Some(ref subj) = req.subject {
             let query = format!("SUBJECT \"{}\"", escape_search_string(subj));
-            if let Ok(uids) = self.session.uid_search(&query) {
+            if let Ok(uids) = self.session.uid_search(&query).await {
                 all_uids.extend(uids);
             }
         }
@@ -1046,9 +1159,13 @@ impl EmailClient {
             .collect::<Vec<_>>()
             .join(",");
 
-        let fetches = self
+        let fetches: Vec<Fetch> = self
             .session
             .uid_fetch(uid_set, "(UID ENVELOPE FLAGS BODY.PEEK[HEADER])")
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect()
+            .await
             .map_err(|e| e.to_string())?;
 
         let mut messages: Vec<ThreadMessage> = fetches
@@ -1057,20 +1174,28 @@ impl EmailClient {
                 let uid = fetch.uid?;
                 let envelope = fetch.envelope();
 
-                let subject = envelope.and_then(|e| e.subject).map(decode_rfc2047);
+                let subject = envelope
+                    .and_then(|e| e.subject.as_ref())
+                    .map(|s| decode_rfc2047(s));
                 let date = envelope
-                    .and_then(|e| e.date)
+                    .and_then(|e| e.date.as_ref())
                     .map(|d| String::from_utf8_lossy(d).into_owned());
                 let from = envelope
                     .and_then(|e| e.from.as_ref())
                     .map(|addrs| {
                         addrs
                             .iter()
-                            .map(|a| format_address_parts(a.name, a.mailbox, a.host))
+                            .map(|a| {
+                                format_address_parts(
+                                    a.name.as_deref(),
+                                    a.mailbox.as_deref(),
+                                    a.host.as_deref(),
+                                )
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
-                let flags = fetch.flags().iter().map(MessageFlag::from).collect();
+                let flags = fetch.flags().map(|f| MessageFlag::from(&f)).collect();
 
                 let (message_id, in_reply_to, references) = fetch
                     .header()
