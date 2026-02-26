@@ -675,8 +675,30 @@ impl EmailClient {
                         total_in_mailbox: total,
                     });
                 }
+                let uids = self
+                    .session
+                    .uid_search(format!("UID 1:{}", before_uid - 1))
+                    .map_err(|e| e.to_string())?;
+
+                if uids.is_empty() {
+                    return Ok(ListMessagesResponse {
+                        messages: Vec::new(),
+                        total_in_mailbox: total,
+                    });
+                }
+
+                let mut uid_vec: Vec<u32> = uids.into_iter().collect();
+                uid_vec.sort_unstable_by(|a, b| b.cmp(a));
+                uid_vec.truncate(limit as usize);
+
+                let uid_set = uid_vec
+                    .iter()
+                    .map(|u| u.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+
                 self.session
-                    .uid_fetch(format!("1:{}", before_uid - 1), "(UID ENVELOPE FLAGS)")
+                    .uid_fetch(uid_set, "(UID ENVELOPE FLAGS)")
                     .map_err(|e| e.to_string())?
             }
             None => {
@@ -689,7 +711,6 @@ impl EmailClient {
 
         let mut messages = extract_summaries(&fetches);
         messages.sort_by(|a, b| b.uid.cmp(&a.uid));
-        messages.truncate(limit as usize);
         debug!(returned = messages.len(), "fetched messages");
 
         Ok(ListMessagesResponse {
@@ -1274,10 +1295,7 @@ mod tests {
 
         let read = get_property(&schema, "read");
         assert!(
-            read["description"]
-                .as_str()
-                .unwrap()
-                .contains("unread"),
+            read["description"].as_str().unwrap().contains("unread"),
             "read description should mention unread"
         );
     }

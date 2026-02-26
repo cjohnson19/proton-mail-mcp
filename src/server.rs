@@ -42,8 +42,14 @@ impl ProtonMailService {
             client.list_mailboxes()
         })
         .await
-        .map_err(|e| { error!(error = %e, "tool.list_mailboxes join error"); format!("Task join error: {e}") })?
-        .map_err(|e| { error!(error = %e, "tool.list_mailboxes failed"); e })?;
+        .map_err(|e| {
+            error!(error = %e, "tool.list_mailboxes join error");
+            format!("Task join error: {e}")
+        })?
+        .map_err(|e| {
+            error!(error = %e, "tool.list_mailboxes failed");
+            e
+        })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -64,8 +70,14 @@ impl ProtonMailService {
             client.list_messages(req)
         })
         .await
-        .map_err(|e| { error!(error = %e, "tool.list_messages join error"); format!("Task join error: {e}") })?
-        .map_err(|e| { error!(error = %e, "tool.list_messages failed"); e })?;
+        .map_err(|e| {
+            error!(error = %e, "tool.list_messages join error");
+            format!("Task join error: {e}")
+        })?
+        .map_err(|e| {
+            error!(error = %e, "tool.list_messages failed");
+            e
+        })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -86,8 +98,14 @@ impl ProtonMailService {
             client.get_message(req)
         })
         .await
-        .map_err(|e| { error!(error = %e, "tool.get_message join error"); format!("Task join error: {e}") })?
-        .map_err(|e| { error!(error = %e, "tool.get_message failed"); e })?;
+        .map_err(|e| {
+            error!(error = %e, "tool.get_message join error");
+            format!("Task join error: {e}")
+        })?
+        .map_err(|e| {
+            error!(error = %e, "tool.get_message failed");
+            e
+        })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -108,8 +126,14 @@ impl ProtonMailService {
             client.search_messages(req)
         })
         .await
-        .map_err(|e| { error!(error = %e, "tool.search_messages join error"); format!("Task join error: {e}") })?
-        .map_err(|e| { error!(error = %e, "tool.search_messages failed"); e })?;
+        .map_err(|e| {
+            error!(error = %e, "tool.search_messages join error");
+            format!("Task join error: {e}")
+        })?
+        .map_err(|e| {
+            error!(error = %e, "tool.search_messages failed");
+            e
+        })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -130,8 +154,14 @@ impl ProtonMailService {
             client.get_mailbox_status(req)
         })
         .await
-        .map_err(|e| { error!(error = %e, "tool.get_mailbox_status join error"); format!("Task join error: {e}") })?
-        .map_err(|e| { error!(error = %e, "tool.get_mailbox_status failed"); e })?;
+        .map_err(|e| {
+            error!(error = %e, "tool.get_mailbox_status join error");
+            format!("Task join error: {e}")
+        })?
+        .map_err(|e| {
+            error!(error = %e, "tool.get_mailbox_status failed");
+            e
+        })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -152,8 +182,14 @@ impl ProtonMailService {
             client.get_attachment(req)
         })
         .await
-        .map_err(|e| { error!(error = %e, "tool.get_attachment join error"); format!("Task join error: {e}") })?
-        .map_err(|e| { error!(error = %e, "tool.get_attachment failed"); e })?;
+        .map_err(|e| {
+            error!(error = %e, "tool.get_attachment join error");
+            format!("Task join error: {e}")
+        })?
+        .map_err(|e| {
+            error!(error = %e, "tool.get_attachment failed");
+            e
+        })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -178,8 +214,14 @@ impl ProtonMailService {
             client.archive_message(req)
         })
         .await
-        .map_err(|e| { error!(error = %e, "tool.archive_message join error"); format!("Task join error: {e}") })?
-        .map_err(|e| { error!(error = %e, "tool.archive_message failed"); e })?;
+        .map_err(|e| {
+            error!(error = %e, "tool.archive_message join error");
+            format!("Task join error: {e}")
+        })?
+        .map_err(|e| {
+            error!(error = %e, "tool.archive_message failed");
+            e
+        })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -204,8 +246,14 @@ impl ProtonMailService {
             client.move_message(req)
         })
         .await
-        .map_err(|e| { error!(error = %e, "tool.move_message join error"); format!("Task join error: {e}") })?
-        .map_err(|e| { error!(error = %e, "tool.move_message failed"); e })?;
+        .map_err(|e| {
+            error!(error = %e, "tool.move_message join error");
+            format!("Task join error: {e}")
+        })?
+        .map_err(|e| {
+            error!(error = %e, "tool.move_message failed");
+            e
+        })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -230,8 +278,14 @@ impl ProtonMailService {
             client.mark_as_read(req)
         })
         .await
-        .map_err(|e| { error!(error = %e, "tool.mark_as_read join error"); format!("Task join error: {e}") })?
-        .map_err(|e| { error!(error = %e, "tool.mark_as_read failed"); e })?;
+        .map_err(|e| {
+            error!(error = %e, "tool.mark_as_read join error");
+            format!("Task join error: {e}")
+        })?
+        .map_err(|e| {
+            error!(error = %e, "tool.mark_as_read failed");
+            e
+        })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
@@ -252,8 +306,14 @@ impl ProtonMailService {
             client.list_messages_by_thread(req)
         })
         .await
-        .map_err(|e| { error!(error = %e, "tool.list_messages_by_thread join error"); format!("Task join error: {e}") })?
-        .map_err(|e| { error!(error = %e, "tool.list_messages_by_thread failed"); e })?;
+        .map_err(|e| {
+            error!(error = %e, "tool.list_messages_by_thread join error");
+            format!("Task join error: {e}")
+        })?
+        .map_err(|e| {
+            error!(error = %e, "tool.list_messages_by_thread failed");
+            e
+        })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
