@@ -23,7 +23,7 @@ pub struct EmailClient {
 pub struct ListMailboxesRequest;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
-struct MailboxDescription {
+pub struct MailboxDescription {
     /// Mailbox name
     name: String,
     /// Mailbox attributes (e.g. NoSelect, NoInferiors)
@@ -694,6 +694,45 @@ impl EmailClient {
             e.0.to_string()
         })?;
         debug!("IMAP session established");
+        Ok(Self {
+            session: imap_session,
+        })
+    }
+
+    /// Connect via IMAPS (direct TLS, no STARTTLS). Used for servers that
+    /// provide TLS on connect (e.g. port 993 / GreenMail port 3993).
+    pub async fn new_direct_tls(
+        domain: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+    ) -> Result<Self, String> {
+        debug!(domain, port, "connecting to IMAPS server (direct TLS)");
+
+        let tcp_stream = TcpStream::connect((domain, port)).await.map_err(|e| {
+            warn!(error = %e, "TCP connection failed");
+            e.to_string()
+        })?;
+
+        let tls_connector = native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .map_err(|e| e.to_string())?;
+        let tls_connector = tokio_native_tls::TlsConnector::from(tls_connector);
+        let tls_stream: TlsStream<TcpStream> = tls_connector
+            .connect(domain, tcp_stream)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "TLS connection failed");
+                e.to_string()
+            })?;
+
+        let client = async_imap::Client::new(tls_stream);
+        let imap_session = client.login(username, password).await.map_err(|e| {
+            warn!(error = %e.0, "IMAP login failed");
+            e.0.to_string()
+        })?;
+        debug!("IMAPS session established");
         Ok(Self {
             session: imap_session,
         })

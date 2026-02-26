@@ -4,11 +4,8 @@ use rmcp::ServiceExt;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-use crate::email_client::EmailClient;
-use crate::server::ProtonMailService;
-
-mod email_client;
-mod server;
+use proton_mail_mcp::email_client::EmailClient;
+use proton_mail_mcp::server::ProtonMailService;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
