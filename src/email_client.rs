@@ -377,6 +377,33 @@ pub struct MoveMessageResponse {
     pub destination_mailbox: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MarkAsReadRequest {
+    /// Name of the mailbox containing the message (e.g. "INBOX")
+    #[schemars(length(min = 1), example = &"INBOX")]
+    pub mailbox_name: String,
+    /// UID of the message to mark
+    #[schemars(range(min = 1))]
+    pub uid: u32,
+    /// Read status of the message. Set to false to mark as unread instead
+    #[serde(default = "default_true")]
+    pub read: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MarkAsReadResponse {
+    /// UID of the message
+    pub uid: u32,
+    /// Mailbox the message is in
+    pub mailbox_name: String,
+    /// Whether the message is now marked as read
+    pub read: bool,
+}
+
 fn decode_rfc2047(raw: &[u8]) -> String {
     let lossy = String::from_utf8_lossy(raw);
     let header_line = format!("Subject: {lossy}");
@@ -925,6 +952,29 @@ impl EmailClient {
         })
     }
 
+    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = req.uid, read = req.read))]
+    pub fn mark_as_read(&mut self, req: MarkAsReadRequest) -> Result<MarkAsReadResponse, String> {
+        self.session
+            .select(&req.mailbox_name)
+            .map_err(|e| e.to_string())?;
+
+        let flag_op = if req.read { "+FLAGS" } else { "-FLAGS" };
+        self.session
+            .uid_store(req.uid.to_string(), format!("{flag_op} (\\Seen)"))
+            .map_err(|e| e.to_string())?;
+
+        debug!(
+            "message marked as {}",
+            if req.read { "read" } else { "unread" }
+        );
+
+        Ok(MarkAsReadResponse {
+            uid: req.uid,
+            mailbox_name: req.mailbox_name,
+            read: req.read,
+        })
+    }
+
     #[instrument(skip(self), fields(mailbox = %req.mailbox_name, has_message_id = req.message_id.is_some(), has_subject = req.subject.is_some()))]
     pub fn list_messages_by_thread(
         &mut self,
@@ -1208,6 +1258,38 @@ mod tests {
     }
 
     #[test]
+    fn mark_as_read_request_schema() {
+        let schema = serde_json::to_value(schema_for!(MarkAsReadRequest)).unwrap();
+        let mailbox = get_property(&schema, "mailbox_name");
+        assert_eq!(mailbox["minLength"], 1);
+        assert!(
+            mailbox["examples"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("INBOX".into()))
+        );
+
+        let uid = get_property(&schema, "uid");
+        assert_eq!(uid["minimum"], 1);
+
+        let read = get_property(&schema, "read");
+        assert!(
+            read["description"]
+                .as_str()
+                .unwrap()
+                .contains("unread"),
+            "read description should mention unread"
+        );
+    }
+
+    #[test]
+    fn mark_as_read_request_defaults_to_true() {
+        let req: MarkAsReadRequest =
+            serde_json::from_str(r#"{"mailbox_name": "INBOX", "uid": 1}"#).unwrap();
+        assert!(req.read, "read should default to true");
+    }
+
+    #[test]
     fn response_structs_have_field_descriptions() {
         let check_descriptions = |schema: Value, struct_name: &str, fields: &[&str]| {
             fields.iter().for_each(|field| {
@@ -1285,6 +1367,11 @@ mod tests {
             serde_json::to_value(schema_for!(MoveMessageResponse)).unwrap(),
             "MoveMessageResponse",
             &["uid", "source_mailbox", "destination_mailbox"],
+        );
+        check_descriptions(
+            serde_json::to_value(schema_for!(MarkAsReadResponse)).unwrap(),
+            "MarkAsReadResponse",
+            &["uid", "mailbox_name", "read"],
         );
     }
 

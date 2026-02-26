@@ -10,8 +10,8 @@ use tracing::{error, info};
 
 use crate::email_client::{
     ArchiveMessageRequest, EmailClient, GetAttachmentRequest, GetMailboxStatusRequest,
-    GetMessageRequest, ListMessagesByThreadRequest, ListMessagesRequest, MoveMessageRequest,
-    SearchMessagesRequest,
+    GetMessageRequest, ListMessagesByThreadRequest, ListMessagesRequest, MarkAsReadRequest,
+    MoveMessageRequest, SearchMessagesRequest,
 };
 
 #[derive(Clone)]
@@ -206,6 +206,32 @@ impl ProtonMailService {
         .await
         .map_err(|e| { error!(error = %e, "tool.move_message join error"); format!("Task join error: {e}") })?
         .map_err(|e| { error!(error = %e, "tool.move_message failed"); e })?;
+
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        title = "Mark as Read",
+        description = "Mark a message as read or unread by UID. Defaults to marking as read; set read=false to mark as unread.",
+        annotations(
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn mark_as_read(
+        &self,
+        Parameters(req): Parameters<MarkAsReadRequest>,
+    ) -> Result<String, String> {
+        info!(mailbox = %req.mailbox_name, uid = req.uid, read = req.read, "tool.mark_as_read");
+        let client = self.client.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut client = client.lock().map_err(|e| e.to_string())?;
+            client.mark_as_read(req)
+        })
+        .await
+        .map_err(|e| { error!(error = %e, "tool.mark_as_read join error"); format!("Task join error: {e}") })?
+        .map_err(|e| { error!(error = %e, "tool.mark_as_read failed"); e })?;
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
