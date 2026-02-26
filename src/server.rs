@@ -263,14 +263,33 @@ impl ProtonMailService {
 impl ServerHandler for ProtonMailService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some(
-                "Proton Mail MCP server — interact with Proton Mail via IMAP.".into(),
-            ),
+            instructions: Some(concat!(
+                "Read and organize a Proton Mail inbox via IMAP. ",
+                "Read-only by default; can also archive, move, and mark messages.\n",
+                "\n",
+                "Capabilities:\n",
+                "- Browse mailboxes and list/search messages with pagination\n",
+                "- Read full message content (text auto-extracted from HTML)\n",
+                "- Download attachments (base64-encoded)\n",
+                "- Find conversation threads by Message-ID or subject\n",
+                "- Archive messages, move between mailboxes, mark read/unread\n",
+                "\n",
+                "Cannot: send, reply, draft, delete, or manage mailboxes.\n",
+                "\n",
+                "Key conventions:\n",
+                "- Messages are identified by UID + mailbox_name (e.g. \"INBOX\")\n",
+                "- Use list_mailboxes to discover available mailbox names\n",
+                "- Use list_messages or search_messages to find UIDs, then get_message for full content\n",
+                "- Pagination: pass the lowest UID from results as before_uid for the next page\n",
+                "- Dates in search use DD-Mon-YYYY format (e.g. \"01-Jan-2024\")\n",
+                "- get_message does not mark messages as read; use mark_as_read separately",
+            ).into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {
                 name: "proton-mail-mcp".into(),
                 title: Some("Proton Mail".into()),
                 version: env!("CARGO_PKG_VERSION").into(),
+                description: Some("MCP server for reading and organizing Proton Mail via IMAP through Proton Mail Bridge".into()),
                 ..Default::default()
             },
             ..Default::default()
