@@ -41,3 +41,21 @@ MCP server for Proton Mail. Connects via IMAP through [Proton Mail Bridge](https
 | `trash_message` | Move a message to Trash |
 | `move_message` | Move a message to a different mailbox |
 | `mark_as_read` | Mark a message as read or unread |
+
+## Testing
+
+Unit tests run without any external dependencies:
+
+```sh
+cargo test --lib
+```
+
+Integration tests require a running [GreenMail](https://greenmail-mail-test.github.io/greenmail/) IMAP server:
+
+```sh
+docker compose up -d
+cargo test --test imap_integration
+docker compose down
+```
+
+By default, tests connect to `127.0.0.1:3993` (IMAPS). Override with `TEST_HOST` and `TEST_IMAPS_PORT` if needed.
