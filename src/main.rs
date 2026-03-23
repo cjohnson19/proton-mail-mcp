@@ -1,4 +1,5 @@
 use std::env;
+use std::time::Duration;
 
 use rmcp::ServiceExt;
 use tracing::{error, info};
@@ -9,6 +10,7 @@ use proton_mail_mcp::server::ProtonMailService;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    const RETRY_LIMIT: usize = 10;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
         .with_writer(std::io::stderr)
@@ -33,18 +35,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     info!("Connecting to Proton Mail Bridge at {hostname}:{port}");
-    let client = EmailClient::new(&hostname, port, &username, &password)
-        .await
-        .map_err(|e| {
-            error!(error = %e, "failed to connect to IMAP server");
-            e
-        })?;
-    info!("Connected successfully");
-
-    let service = ProtonMailService::new(client);
-    let server = service.serve(rmcp::transport::io::stdio()).await?;
-    info!("MCP server running on stdio");
-    server.waiting().await?;
-
-    Ok(())
+    let mut last_err = None;
+    for attempt in 1..=RETRY_LIMIT {
+        match EmailClient::new(&hostname, port, &username, &password).await {
+            Ok(client) => {
+                info!("Connected successfully");
+                let service = ProtonMailService::new(client);
+                let server = service.serve(rmcp::transport::io::stdio()).await?;
+                info!("MCP server running on stdio");
+                server.waiting().await?;
+                return Ok(());
+            }
+            Err(e) => {
+                error!("attempt {attempt}/{RETRY_LIMIT} failed to connect: {e}");
+                last_err = Some(e);
+                if attempt < RETRY_LIMIT {
+                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap().into())
 }
