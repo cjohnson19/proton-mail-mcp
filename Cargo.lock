@@ -934,6 +934,7 @@ dependencies = [
  "base64",
  "futures",
  "html2text",
+ "imap-proto",
  "mailparse",
  "native-tls",
  "rmcp",

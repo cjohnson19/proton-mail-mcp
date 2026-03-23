@@ -6,12 +6,14 @@ use async_imap::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures::TryStreamExt;
-use mailparse::MailHeaderMap;
+use mailparse::{MailAddr, MailHeaderMap, addrparse_header};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_native_tls::TlsStream;
 use tracing::{debug, instrument, warn};
+
+const FETCH_HEADERS: &str = "(UID FLAGS BODY.PEEK[HEADER])";
 
 #[derive(Debug)]
 pub struct EmailClient {
@@ -428,36 +430,25 @@ pub struct MarkAsReadResponse {
     pub read: bool,
 }
 
-fn decode_rfc2047(raw: &[u8]) -> String {
-    let lossy = String::from_utf8_lossy(raw);
-    let header_line = format!("Subject: {lossy}");
-    mailparse::parse_header(header_line.as_bytes())
-        .map(|(header, _)| header.get_value())
-        .unwrap_or_else(|_| lossy.into_owned())
+fn format_addr(info: &mailparse::SingleInfo) -> String {
+    match info.display_name {
+        Some(ref name) if !name.is_empty() => format!("{name} <{}>", info.addr),
+        _ => info.addr.clone(),
+    }
 }
 
-fn format_address_parts(
-    name: Option<&[u8]>,
-    mailbox: Option<&[u8]>,
-    host: Option<&[u8]>,
-) -> String {
-    let mailbox_str = mailbox
-        .map(|m| String::from_utf8_lossy(m))
-        .unwrap_or_default();
-    let host_str = host.map(|h| String::from_utf8_lossy(h)).unwrap_or_default();
-    let email = format!("{mailbox_str}@{host_str}");
-
-    match name {
-        Some(n) if !n.is_empty() => {
-            let decoded = decode_rfc2047(n);
-            if decoded.is_empty() {
-                email
-            } else {
-                format!("{decoded} <{email}>")
-            }
-        }
-        _ => email,
-    }
+fn parse_address_header(header: &mailparse::MailHeader) -> Vec<String> {
+    addrparse_header(header)
+        .map(|addrs| {
+            addrs
+                .iter()
+                .flat_map(|addr| match addr {
+                    MailAddr::Single(info) => vec![format_addr(info)],
+                    MailAddr::Group(group) => group.addrs.iter().map(format_addr).collect(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn extract_summaries(fetches: &[Fetch]) -> Vec<MessageSummary> {
@@ -465,32 +456,14 @@ fn extract_summaries(fetches: &[Fetch]) -> Vec<MessageSummary> {
         .iter()
         .filter_map(|fetch| {
             let uid = fetch.uid?;
-            let envelope = fetch.envelope();
+            let (headers, _) = mailparse::parse_headers(fetch.header()?).ok()?;
 
-            let subject = envelope
-                .and_then(|e| e.subject.as_deref())
-                .map(decode_rfc2047);
-
-            let date = envelope
-                .and_then(|e| e.date.as_deref())
-                .map(|d| String::from_utf8_lossy(d).into_owned());
-
-            let from = envelope
-                .and_then(|e| e.from.as_ref())
-                .map(|addrs| {
-                    addrs
-                        .iter()
-                        .map(|a| {
-                            format_address_parts(
-                                a.name.as_deref(),
-                                a.mailbox.as_deref(),
-                                a.host.as_deref(),
-                            )
-                        })
-                        .collect()
-                })
+            let subject = headers.get_first_value("Subject");
+            let date = headers.get_first_value("Date");
+            let from = headers
+                .get_first_header("From")
+                .map(parse_address_header)
                 .unwrap_or_default();
-
             let flags = fetch.flags().map(|f| MessageFlag::from(&f)).collect();
 
             Some(MessageSummary {
@@ -807,7 +780,7 @@ impl EmailClient {
                     .join(",");
 
                 self.session
-                    .uid_fetch(uid_set, "(UID ENVELOPE FLAGS)")
+                    .uid_fetch(uid_set, FETCH_HEADERS)
                     .await
                     .map_err(|e| e.to_string())?
                     .try_collect()
@@ -817,7 +790,7 @@ impl EmailClient {
             None => {
                 let start = total.saturating_sub(limit).saturating_add(1);
                 self.session
-                    .fetch(format!("{start}:{total}"), "(UID ENVELOPE FLAGS)")
+                    .fetch(format!("{start}:{total}"), FETCH_HEADERS)
                     .await
                     .map_err(|e| e.to_string())?
                     .try_collect()
@@ -848,7 +821,7 @@ impl EmailClient {
 
         let fetches: Vec<Fetch> = self
             .session
-            .uid_fetch(req.uid.to_string(), "(UID ENVELOPE FLAGS BODY.PEEK[])")
+            .uid_fetch(req.uid.to_string(), "(UID FLAGS BODY.PEEK[])")
             .await
             .map_err(|e| e.to_string())?
             .try_collect()
@@ -859,74 +832,31 @@ impl EmailClient {
             .first()
             .ok_or_else(|| format!("Message with UID {} not found", req.uid))?;
 
-        let envelope = fetch.envelope().ok_or("Message has no envelope")?;
+        let raw = fetch.body().ok_or("Message has no body")?;
+        let parsed = mailparse::parse_mail(raw).map_err(|e| e.to_string())?;
 
-        let subject = envelope.subject.as_ref().map(|s| decode_rfc2047(s));
-        let date = envelope
-            .date
-            .as_ref()
-            .map(|d| String::from_utf8_lossy(d).into_owned());
-
-        let from: Vec<String> = envelope
-            .from
-            .as_ref()
-            .map(|addrs| {
-                addrs
-                    .iter()
-                    .map(|a| {
-                        format_address_parts(
-                            a.name.as_deref(),
-                            a.mailbox.as_deref(),
-                            a.host.as_deref(),
-                        )
-                    })
-                    .collect()
-            })
+        let subject = parsed.headers.get_first_value("Subject");
+        let date = parsed.headers.get_first_value("Date");
+        let from = parsed
+            .headers
+            .get_first_header("From")
+            .map(parse_address_header)
             .unwrap_or_default();
-        let to: Vec<String> = envelope
-            .to
-            .as_ref()
-            .map(|addrs| {
-                addrs
-                    .iter()
-                    .map(|a| {
-                        format_address_parts(
-                            a.name.as_deref(),
-                            a.mailbox.as_deref(),
-                            a.host.as_deref(),
-                        )
-                    })
-                    .collect()
-            })
+        let to = parsed
+            .headers
+            .get_first_header("To")
+            .map(parse_address_header)
             .unwrap_or_default();
-        let cc: Vec<String> = envelope
-            .cc
-            .as_ref()
-            .map(|addrs| {
-                addrs
-                    .iter()
-                    .map(|a| {
-                        format_address_parts(
-                            a.name.as_deref(),
-                            a.mailbox.as_deref(),
-                            a.host.as_deref(),
-                        )
-                    })
-                    .collect()
-            })
+        let cc = parsed
+            .headers
+            .get_first_header("Cc")
+            .map(parse_address_header)
             .unwrap_or_default();
         let flags = fetch.flags().map(|f| MessageFlag::from(&f)).collect();
 
-        let (mut body_text, body_html, attachments) = match fetch.body() {
-            Some(raw) => {
-                let parsed = mailparse::parse_mail(raw).map_err(|e| e.to_string())?;
-                let (text, html) = extract_body_parts(&parsed);
-                let mut atts = Vec::new();
-                collect_attachments(&parsed, &mut atts);
-                (text, html, atts)
-            }
-            None => (None, None, Vec::new()),
-        };
+        let (mut body_text, body_html) = extract_body_parts(&parsed);
+        let mut attachments = Vec::new();
+        collect_attachments(&parsed, &mut attachments);
 
         if body_text.is_none()
             && let Some(ref html) = body_html
@@ -995,7 +925,7 @@ impl EmailClient {
 
         let fetches: Vec<Fetch> = self
             .session
-            .uid_fetch(uid_set, "(UID ENVELOPE FLAGS)")
+            .uid_fetch(uid_set, FETCH_HEADERS)
             .await
             .map_err(|e| e.to_string())?
             .try_collect()
@@ -1245,7 +1175,7 @@ impl EmailClient {
 
         let fetches: Vec<Fetch> = self
             .session
-            .uid_fetch(uid_set, "(UID ENVELOPE FLAGS BODY.PEEK[HEADER])")
+            .uid_fetch(uid_set, FETCH_HEADERS)
             .await
             .map_err(|e| e.to_string())?
             .try_collect()
@@ -1256,42 +1186,18 @@ impl EmailClient {
             .iter()
             .filter_map(|fetch| {
                 let uid = fetch.uid?;
-                let envelope = fetch.envelope();
+                let (headers, _) = mailparse::parse_headers(fetch.header()?).ok()?;
 
-                let subject = envelope
-                    .and_then(|e| e.subject.as_ref())
-                    .map(|s| decode_rfc2047(s));
-                let date = envelope
-                    .and_then(|e| e.date.as_ref())
-                    .map(|d| String::from_utf8_lossy(d).into_owned());
-                let from = envelope
-                    .and_then(|e| e.from.as_ref())
-                    .map(|addrs| {
-                        addrs
-                            .iter()
-                            .map(|a| {
-                                format_address_parts(
-                                    a.name.as_deref(),
-                                    a.mailbox.as_deref(),
-                                    a.host.as_deref(),
-                                )
-                            })
-                            .collect()
-                    })
+                let subject = headers.get_first_value("Subject");
+                let date = headers.get_first_value("Date");
+                let from = headers
+                    .get_first_header("From")
+                    .map(parse_address_header)
                     .unwrap_or_default();
                 let flags = fetch.flags().map(|f| MessageFlag::from(&f)).collect();
-
-                let (message_id, in_reply_to, references) = fetch
-                    .header()
-                    .and_then(|raw| mailparse::parse_headers(raw).ok())
-                    .map(|(headers, _)| {
-                        (
-                            headers.get_first_value("Message-ID"),
-                            headers.get_first_value("In-Reply-To"),
-                            headers.get_first_value("References"),
-                        )
-                    })
-                    .unwrap_or((None, None, None));
+                let message_id = headers.get_first_value("Message-ID");
+                let in_reply_to = headers.get_first_value("In-Reply-To");
+                let references = headers.get_first_value("References");
 
                 Some(ThreadMessage {
                     uid,
@@ -1630,6 +1536,55 @@ mod tests {
                     "AttachmentInfo.{field} should have a description"
                 );
             });
+    }
+
+    #[test]
+    fn raw_utf8_in_envelope_causes_takwhile1_error() {
+        // Proton Mail Bridge sends raw UTF-8 in ENVELOPE responses (e.g.
+        // "José" instead of RFC 2047-encoded "=?UTF-8?Q?Jos=C3=A9?=").
+        // imap-proto's parser rejects this with a TakeWhile1 error.
+        let raw_response = b"* 6 FETCH (UID 253 ENVELOPE (\
+            \"Mon, 23 Mar 2026 14:32:50 -0500\" \
+            \"Hello\" \
+            ((\"Ren\xc3\xa9 M\xc3\xbcller\" NIL \"rmuller\" \"example.org\")) \
+            ((\"Ren\xc3\xa9 M\xc3\xbcller\" NIL \"rmuller\" \"example.org\")) \
+            ((NIL NIL \"rmuller\" \"example.org\")) \
+            ((NIL NIL \"user\" \"pm.me\")) \
+            NIL NIL NIL \
+            \"<msg@example.org>\") FLAGS (\\Recent))\r\n";
+
+        let result = imap_proto::parser::parse_response(raw_response);
+        let err = result.unwrap_err();
+        let err_str = format!("{err:?}");
+        assert!(
+            err_str.contains("TakeWhile1"),
+            "should produce the same TakeWhile1 error seen in prod, got: {err_str}"
+        );
+
+        let raw_headers = b"From: \"Ren\xc3\xa9 M\xc3\xbcller\" <rmuller@example.org>\r\n\
+            To: user@pm.me\r\n\
+            Subject: Hello\r\n\
+            Date: Mon, 23 Mar 2026 14:32:50 -0500\r\n\r\n";
+
+        let (headers, _) = mailparse::parse_headers(raw_headers).unwrap();
+        assert_eq!(
+            headers.get_first_value("Subject").as_deref(),
+            Some("Hello")
+        );
+
+        let from_header = headers.get_first_header("From").unwrap();
+        let addrs = parse_address_header(from_header);
+        assert_eq!(addrs.len(), 1);
+        assert!(
+            addrs[0].contains("René"),
+            "should preserve UTF-8 name, got: {}",
+            addrs[0]
+        );
+        assert!(
+            addrs[0].contains("rmuller@example.org"),
+            "should contain email, got: {}",
+            addrs[0]
+        );
     }
 
     #[test]
