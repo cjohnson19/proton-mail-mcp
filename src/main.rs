@@ -12,7 +12,7 @@ use proton_mail_mcp::server::ProtonMailService;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     const RETRY_LIMIT: usize = 10;
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
+        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
