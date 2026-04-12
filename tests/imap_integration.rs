@@ -2,7 +2,7 @@ mod helpers;
 
 use helpers::{
     append_message, build_attachment_message, build_html_message, build_rfc2822_message,
-    connect_client, create_mailbox, imap_session,
+    connect_client, create_mailbox, ensure_mailbox, imap_session,
 };
 use proton_mail_mcp::email_client::*;
 
@@ -773,4 +773,217 @@ async fn test_mark_as_unread() {
         .await
         .unwrap();
     assert_eq!(status.unseen, Some(1));
+}
+
+fn basic_draft_request(to: &str, subject: &str, body: &str) -> DraftEmailRequest {
+    DraftEmailRequest {
+        from: None,
+        to: vec![to.into()],
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: subject.into(),
+        body_text: body.into(),
+        in_reply_to: None,
+        drafts_mailbox: "Drafts".into(),
+    }
+}
+
+#[tokio::test]
+async fn test_draft_email_basic() {
+    let user = "drafts@localhost";
+
+    let mut raw = imap_session(user).await;
+    ensure_mailbox(&mut raw, "Drafts").await;
+    raw.logout().await.ok();
+
+    let mut client = connect_client(user).await;
+    let resp = client
+        .draft_email(basic_draft_request(
+            "recipient@example.com",
+            "Draft subject",
+            "Hello, this is a draft.",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.drafts_mailbox, "Drafts");
+    assert!(resp.message_id.starts_with('<') && resp.message_id.ends_with('>'));
+    assert!(!resp.threaded);
+
+    let list = client
+        .list_messages(ListMessagesRequest {
+            mailbox_name: "Drafts".into(),
+            limit: 10,
+            before_uid: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(list.messages.len(), 1);
+    let summary = &list.messages[0];
+    assert_eq!(summary.subject.as_deref(), Some("Draft subject"));
+    assert!(
+        summary.flags.contains(&MessageFlag::Draft),
+        "expected \\Draft flag, got: {:?}",
+        summary.flags
+    );
+
+    let full = client
+        .get_message(GetMessageRequest {
+            mailbox_name: "Drafts".into(),
+            uid: summary.uid,
+            include_html: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(full.subject.as_deref(), Some("Draft subject"));
+    assert!(
+        full.from.iter().any(|f| f.contains(user)),
+        "From should default to the login user, got: {:?}",
+        full.from
+    );
+    assert!(
+        full.to.iter().any(|t| t.contains("recipient@example.com")),
+        "To should contain recipient, got: {:?}",
+        full.to
+    );
+    assert!(
+        full.body_text
+            .as_deref()
+            .is_some_and(|b| b.contains("Hello, this is a draft.")),
+        "body_text missing expected content: {:?}",
+        full.body_text
+    );
+}
+
+#[tokio::test]
+async fn test_draft_email_reply_threading() {
+    let user = "draftreply@localhost";
+    let original_msg_id = "<orig-12345@test.example>";
+
+    let mut raw = imap_session(user).await;
+    ensure_mailbox(&mut raw, "Drafts").await;
+    append_message(
+        &mut raw,
+        "INBOX",
+        &build_rfc2822_message(
+            "sender@example.com",
+            user,
+            "Original subject",
+            "original body",
+            &[("Message-ID", original_msg_id)],
+        ),
+    )
+    .await;
+    raw.logout().await.ok();
+
+    let mut client = connect_client(user).await;
+    let inbox_list = client
+        .list_messages(ListMessagesRequest {
+            mailbox_name: "INBOX".into(),
+            limit: 1,
+            before_uid: None,
+        })
+        .await
+        .unwrap();
+    let orig_uid = inbox_list.messages[0].uid;
+
+    let resp = client
+        .draft_email(DraftEmailRequest {
+            from: None,
+            to: vec!["sender@example.com".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Re: Original subject".into(),
+            body_text: "My reply.".into(),
+            in_reply_to: Some(InReplyTo {
+                mailbox_name: "INBOX".into(),
+                uid: orig_uid,
+            }),
+            drafts_mailbox: "Drafts".into(),
+        })
+        .await
+        .unwrap();
+    assert!(resp.threaded, "draft should be threaded");
+
+    let thread = client
+        .list_messages_by_thread(ListMessagesByThreadRequest {
+            mailbox_name: "Drafts".into(),
+            message_id: Some(original_msg_id.into()),
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        thread.messages.len(),
+        1,
+        "expected the draft to match thread search, got: {:?}",
+        thread.messages
+    );
+    let draft = &thread.messages[0];
+    assert_eq!(
+        draft.in_reply_to.as_deref(),
+        Some(original_msg_id),
+        "In-Reply-To should be the original Message-ID"
+    );
+    assert!(
+        draft
+            .references
+            .as_deref()
+            .is_some_and(|r| r.contains(original_msg_id)),
+        "References should contain the original Message-ID, got: {:?}",
+        draft.references
+    );
+}
+
+#[tokio::test]
+async fn test_draft_email_from_override() {
+    let user = "draftfrom@localhost";
+
+    let mut raw = imap_session(user).await;
+    ensure_mailbox(&mut raw, "Drafts").await;
+    raw.logout().await.ok();
+
+    let mut client = connect_client(user).await;
+    client
+        .draft_email(DraftEmailRequest {
+            from: Some("alias@example.com".into()),
+            to: vec!["recipient@example.com".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "From override".into(),
+            body_text: "body".into(),
+            in_reply_to: None,
+            drafts_mailbox: "Drafts".into(),
+        })
+        .await
+        .unwrap();
+
+    let list = client
+        .list_messages(ListMessagesRequest {
+            mailbox_name: "Drafts".into(),
+            limit: 1,
+            before_uid: None,
+        })
+        .await
+        .unwrap();
+    let uid = list.messages[0].uid;
+
+    let full = client
+        .get_message(GetMessageRequest {
+            mailbox_name: "Drafts".into(),
+            uid,
+            include_html: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        full.from.iter().any(|f| f.contains("alias@example.com")),
+        "From should be the override, got: {:?}",
+        full.from
+    );
+    assert!(
+        !full.from.iter().any(|f| f.contains(user)),
+        "From should NOT contain the default login user, got: {:?}",
+        full.from
+    );
 }

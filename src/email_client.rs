@@ -6,6 +6,7 @@ use async_imap::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures::TryStreamExt;
+use mail_builder::{MessageBuilder, headers::address::Address, mime::make_boundary};
 use mailparse::{MailAddr, MailHeaderMap, addrparse_header};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -14,10 +15,12 @@ use tokio_native_tls::TlsStream;
 use tracing::{debug, instrument, warn};
 
 const FETCH_HEADERS: &str = "(UID FLAGS BODY.PEEK[HEADER])";
+const FETCH_THREAD_HEADERS: &str = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])";
 
 #[derive(Debug)]
 pub struct EmailClient {
     session: Session<TlsStream<TcpStream>>,
+    default_from: String,
 }
 
 #[allow(dead_code)]
@@ -89,7 +92,7 @@ impl From<&Name> for MailboxDescription {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ListMailboxesResponse(Vec<MailboxDescription>);
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum MessageFlag {
     Seen,
     Answered,
@@ -430,6 +433,68 @@ pub struct MarkAsReadResponse {
     pub read: bool,
 }
 
+fn default_drafts_mailbox() -> String {
+    "Drafts".into()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DraftEmailRequest {
+    /// Sender address. Defaults to the configured Proton account email; override
+    /// to send from an alias.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// To recipients. At least one required.
+    #[schemars(length(min = 1))]
+    pub to: Vec<String>,
+    /// Carbon copy recipients.
+    #[serde(default)]
+    pub cc: Vec<String>,
+    /// Blind carbon copy recipients.
+    #[serde(default)]
+    pub bcc: Vec<String>,
+    /// Subject line.
+    #[schemars(length(min = 1))]
+    pub subject: String,
+    /// Plain-text body.
+    pub body_text: String,
+    /// Optional: reply to an existing message. The original's Message-ID and
+    /// References headers are fetched and used to set In-Reply-To / References
+    /// on the draft so it threads correctly in mail clients.
+    #[serde(default)]
+    pub in_reply_to: Option<InReplyTo>,
+    /// Drafts mailbox name. Defaults to "Drafts".
+    #[serde(default = "default_drafts_mailbox")]
+    pub drafts_mailbox: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InReplyTo {
+    /// Mailbox containing the message being replied to (e.g. "INBOX").
+    #[schemars(length(min = 1))]
+    pub mailbox_name: String,
+    /// UID of the message being replied to.
+    #[schemars(range(min = 1))]
+    pub uid: u32,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DraftEmailResponse {
+    /// Mailbox the draft was appended to.
+    pub drafts_mailbox: String,
+    /// Message-ID of the draft (angle-bracketed, as it appears in the header).
+    pub message_id: String,
+    /// True if In-Reply-To / References were set from an original message.
+    pub threaded: bool,
+}
+
+#[derive(Debug)]
+struct ThreadHeaders {
+    /// Original Message-ID, stripped of surrounding angle brackets.
+    message_id: String,
+    /// Prior References chain, each entry stripped of angle brackets.
+    references: Vec<String>,
+}
+
 fn format_addr(info: &mailparse::SingleInfo) -> String {
     match info.display_name {
         Some(ref name) if !name.is_empty() => format!("{name} <{}>", info.addr),
@@ -618,6 +683,59 @@ fn build_search_query(req: &SearchMessagesRequest) -> String {
     }
 }
 
+fn strip_message_id_brackets(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    let inner = trimmed.strip_prefix('<')?.strip_suffix('>')?;
+    if inner.is_empty() { None } else { Some(inner) }
+}
+
+fn parse_references(raw: &str) -> Vec<String> {
+    raw.split_whitespace()
+        .filter_map(strip_message_id_brackets)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn build_draft_rfc5322(
+    from: &str,
+    req: &DraftEmailRequest,
+    thread_headers: Option<&ThreadHeaders>,
+) -> Result<(Vec<u8>, String), String> {
+    let message_id_inner = format!("{}.proton-mail-mcp.local", make_boundary("."));
+    let message_id_full = format!("<{message_id_inner}>");
+
+    let to_addrs: Vec<Address<'_>> = req.to.iter().map(|s| Address::from(s.as_str())).collect();
+
+    let mut builder = MessageBuilder::new()
+        .from(Address::from(from))
+        .to(Address::new_list(to_addrs))
+        .subject(req.subject.as_str())
+        .message_id(message_id_inner.as_str())
+        .text_body(req.body_text.as_str());
+
+    if !req.cc.is_empty() {
+        let cc_addrs: Vec<Address<'_>> = req.cc.iter().map(|s| Address::from(s.as_str())).collect();
+        builder = builder.cc(Address::new_list(cc_addrs));
+    }
+    if !req.bcc.is_empty() {
+        let bcc_addrs: Vec<Address<'_>> =
+            req.bcc.iter().map(|s| Address::from(s.as_str())).collect();
+        builder = builder.bcc(Address::new_list(bcc_addrs));
+    }
+
+    if let Some(th) = thread_headers {
+        builder = builder.in_reply_to(th.message_id.as_str());
+        let mut refs: Vec<&str> = th.references.iter().map(String::as_str).collect();
+        refs.push(th.message_id.as_str());
+        builder = builder.references(refs);
+    }
+
+    let raw = builder
+        .write_to_vec()
+        .map_err(|e| format!("failed to build draft: {e}"))?;
+    Ok((raw, message_id_full))
+}
+
 impl EmailClient {
     pub async fn new(
         domain: &str,
@@ -669,6 +787,7 @@ impl EmailClient {
         debug!("IMAP session established");
         Ok(Self {
             session: imap_session,
+            default_from: username.to_owned(),
         })
     }
 
@@ -708,6 +827,7 @@ impl EmailClient {
         debug!("IMAPS session established");
         Ok(Self {
             session: imap_session,
+            default_from: username.to_owned(),
         })
     }
 
@@ -1120,6 +1240,102 @@ impl EmailClient {
             mailbox_name: req.mailbox_name,
             read: req.read,
         })
+    }
+
+    #[instrument(skip(self, req), fields(drafts_mailbox = %req.drafts_mailbox, threaded = req.in_reply_to.is_some()))]
+    pub async fn draft_email(
+        &mut self,
+        req: DraftEmailRequest,
+    ) -> Result<DraftEmailResponse, String> {
+        let from = req
+            .from
+            .clone()
+            .unwrap_or_else(|| self.default_from.clone());
+
+        let thread_headers = match &req.in_reply_to {
+            Some(reply) => {
+                self.fetch_thread_headers(&reply.mailbox_name, reply.uid)
+                    .await?
+            }
+            None => None,
+        };
+
+        let threaded = thread_headers.is_some();
+        let (raw, message_id) = build_draft_rfc5322(&from, &req, thread_headers.as_ref())?;
+
+        self.session
+            .select(&req.drafts_mailbox)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        self.session
+            .append(&req.drafts_mailbox, Some("(\\Draft \\Seen)"), None, &raw)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        debug!(%message_id, threaded, "draft appended");
+
+        Ok(DraftEmailResponse {
+            drafts_mailbox: req.drafts_mailbox,
+            message_id,
+            threaded,
+        })
+    }
+
+    async fn fetch_thread_headers(
+        &mut self,
+        mailbox_name: &str,
+        uid: u32,
+    ) -> Result<Option<ThreadHeaders>, String> {
+        self.session
+            .examine(mailbox_name)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let fetches: Vec<Fetch> = self
+            .session
+            .uid_fetch(uid.to_string(), FETCH_THREAD_HEADERS)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let Some(fetch) = fetches.first() else {
+            warn!(uid, mailbox = mailbox_name, "reply target not found");
+            return Ok(None);
+        };
+
+        let Some(header_bytes) = fetch.header() else {
+            warn!(uid, "reply target missing header section");
+            return Ok(None);
+        };
+        let (headers, _) = mailparse::parse_headers(header_bytes).map_err(|e| e.to_string())?;
+
+        let Some(raw_message_id) = headers.get_first_value("Message-ID") else {
+            warn!(
+                uid,
+                "reply target missing Message-ID header; skipping threading"
+            );
+            return Ok(None);
+        };
+        let message_id = match strip_message_id_brackets(&raw_message_id) {
+            Some(id) => id.to_owned(),
+            None => {
+                warn!(uid, raw = %raw_message_id, "could not parse Message-ID; skipping threading");
+                return Ok(None);
+            }
+        };
+
+        let references = headers
+            .get_first_value("References")
+            .map(|raw| parse_references(&raw))
+            .unwrap_or_default();
+
+        Ok(Some(ThreadHeaders {
+            message_id,
+            references,
+        }))
     }
 
     #[instrument(skip(self), fields(mailbox = %req.mailbox_name, has_message_id = req.message_id.is_some(), has_subject = req.subject.is_some()))]

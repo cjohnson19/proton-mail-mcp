@@ -41,6 +41,7 @@ MCP server for Proton Mail. Connects via IMAP through [Proton Mail Bridge](https
 | `trash_message` | Move a message to Trash |
 | `move_message` | Move a message to a different mailbox |
 | `mark_as_read` | Mark a message as read or unread |
+| `draft_email` | Save a draft to the Drafts mailbox, optionally as a threaded reply |
 
 ## Testing
 

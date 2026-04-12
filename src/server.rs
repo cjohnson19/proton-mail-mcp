@@ -10,9 +10,9 @@ use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use crate::email_client::{
-    ArchiveMessageRequest, EmailClient, GetAttachmentRequest, GetMailboxStatusRequest,
-    GetMessageRequest, ListMessagesByThreadRequest, ListMessagesRequest, MarkAsReadRequest,
-    MoveMessageRequest, SearchMessagesRequest, TrashMessageRequest,
+    ArchiveMessageRequest, DraftEmailRequest, EmailClient, GetAttachmentRequest,
+    GetMailboxStatusRequest, GetMessageRequest, ListMessagesByThreadRequest, ListMessagesRequest,
+    MarkAsReadRequest, MoveMessageRequest, SearchMessagesRequest, TrashMessageRequest,
 };
 
 #[derive(Clone)]
@@ -224,6 +224,33 @@ impl ProtonMailService {
     }
 
     #[tool(
+        title = "Draft Email",
+        description = "Compose an email and save it to the Drafts mailbox. Supports To/Cc/Bcc, subject, and a plain-text body. Pass in_reply_to (source mailbox + UID) to thread as a reply — the original Message-ID and References are fetched and set on the draft. The draft is NOT sent; the user must review and send it from their mail client.",
+        annotations(
+            read_only_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn draft_email(
+        &self,
+        Parameters(req): Parameters<DraftEmailRequest>,
+    ) -> Result<String, String> {
+        info!(
+            drafts_mailbox = %req.drafts_mailbox,
+            to_count = req.to.len(),
+            threaded = req.in_reply_to.is_some(),
+            "tool.draft_email"
+        );
+        let mut client = self.client.lock().await;
+        let result = client.draft_email(req).await.map_err(|e| {
+            error!(error = %e, "tool.draft_email failed");
+            e
+        })?;
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
         title = "List Messages by Thread",
         description = "Find related messages in a thread by Message-ID or subject. Searches In-Reply-To, References, and Message-ID headers to reconstruct conversation threads. At least one of message_id or subject must be provided. Note: search is limited to a single mailbox.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
@@ -248,7 +275,7 @@ impl ServerHandler for ProtonMailService {
         ServerInfo {
             instructions: Some(concat!(
                 "Read and organize a Proton Mail inbox via IMAP. ",
-                "Read-only by default; can also archive, move, and mark messages.\n",
+                "Read-only by default; can also archive, move, mark, and draft messages.\n",
                 "\n",
                 "Capabilities:\n",
                 "- Browse mailboxes and list/search messages with pagination\n",
@@ -256,8 +283,9 @@ impl ServerHandler for ProtonMailService {
                 "- Download attachments (base64-encoded)\n",
                 "- Find conversation threads by Message-ID or subject\n",
                 "- Archive messages, trash messages, move between mailboxes, mark read/unread\n",
+                "- Save drafts (including threaded replies) to the Drafts mailbox\n",
                 "\n",
-                "Cannot: send, reply, draft, or manage mailboxes.\n",
+                "Cannot: send messages or manage mailboxes. Drafts are saved for the user to send manually.\n",
                 "\n",
                 "Key conventions:\n",
                 "- Messages are identified by UID + mailbox_name (e.g. \"INBOX\")\n",
@@ -265,7 +293,8 @@ impl ServerHandler for ProtonMailService {
                 "- Use list_messages or search_messages to find UIDs, then get_message for full content\n",
                 "- Pagination: pass the lowest UID from results as before_uid for the next page\n",
                 "- Dates in search use DD-Mon-YYYY format (e.g. \"01-Jan-2024\")\n",
-                "- get_message does not mark messages as read; use mark_as_read separately",
+                "- get_message does not mark messages as read; use mark_as_read separately\n",
+                "- draft_email writes to the Drafts mailbox; to reply, pass in_reply_to with the source mailbox and UID",
             ).into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {

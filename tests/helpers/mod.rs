@@ -61,6 +61,15 @@ pub async fn create_mailbox(session: &mut Session<TlsStream<TcpStream>>, name: &
     session.create(name).await.expect("IMAP CREATE failed");
 }
 
+pub async fn ensure_mailbox(session: &mut Session<TlsStream<TcpStream>>, name: &str) {
+    if let Err(e) = session.create(name).await {
+        let msg = e.to_string();
+        if !msg.to_lowercase().contains("already exists") {
+            panic!("IMAP CREATE {name} failed: {msg}");
+        }
+    }
+}
+
 pub fn build_rfc2822_message(
     from: &str,
     to: &str,
