@@ -1567,10 +1567,7 @@ mod tests {
             Date: Mon, 23 Mar 2026 14:32:50 -0500\r\n\r\n";
 
         let (headers, _) = mailparse::parse_headers(raw_headers).unwrap();
-        assert_eq!(
-            headers.get_first_value("Subject").as_deref(),
-            Some("Hello")
-        );
+        assert_eq!(headers.get_first_value("Subject").as_deref(), Some("Hello"));
 
         let from_header = headers.get_first_header("From").unwrap();
         let addrs = parse_address_header(from_header);
