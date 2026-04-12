@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use async_imap::{
     Session,
-    types::{Fetch, Flag, Name, NameAttribute},
+    types::{Fetch, Flag, Mailbox, Name, NameAttribute},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures::TryStreamExt;
@@ -15,6 +15,7 @@ use tokio_native_tls::TlsStream;
 use tracing::{debug, instrument, warn};
 
 const FETCH_HEADERS: &str = "(UID FLAGS BODY.PEEK[HEADER])";
+const FETCH_HEADERS_AND_BODY: &str = "(UID FLAGS BODY.PEEK[])";
 const FETCH_THREAD_HEADERS: &str = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])";
 
 #[derive(Debug)]
@@ -27,6 +28,60 @@ pub struct EmailClient {
 #[derive(Debug, JsonSchema)]
 pub struct ListMailboxesRequest;
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecialMailbox {
+    /// The primary inbox. Always resolves to "INBOX" per RFC 3501.
+    Inbox,
+    /// Archive folder (\Archive).
+    Archive,
+    /// Sent messages (\Sent).
+    Sent,
+    /// Drafts (\Drafts).
+    Drafts,
+    /// Trash / deleted items (\Trash).
+    Trash,
+    /// Spam / junk (\Junk). Proton exposes this as "Spam".
+    Spam,
+    /// Cross-folder "All Mail" view (\All). Proton uses this for unified thread search.
+    AllMail,
+    /// Starred / flagged messages (\Flagged).
+    Flagged,
+    /// Important messages (\Important).
+    Important,
+}
+
+impl SpecialMailbox {
+    fn matches_tag(self, tag: &str) -> bool {
+        matches!(
+            (self, tag),
+            (SpecialMailbox::Archive, "archive")
+                | (SpecialMailbox::Sent, "sent")
+                | (SpecialMailbox::Drafts, "drafts")
+                | (SpecialMailbox::Trash, "trash")
+                | (SpecialMailbox::Spam, "junk")
+                | (SpecialMailbox::AllMail, "all")
+                | (SpecialMailbox::Flagged, "flagged")
+                | (SpecialMailbox::Important, "important")
+        )
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResolveSpecialMailboxRequest {
+    /// The well-known folder type to resolve to its actual IMAP name.
+    pub kind: SpecialMailbox,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ResolveSpecialMailboxResponse {
+    /// The kind that was requested.
+    pub kind: SpecialMailbox,
+    /// The IMAP mailbox name (e.g. "INBOX", "Archive", "All Mail"). Pass this
+    /// to any tool that takes a mailbox_name or source_mailbox parameter.
+    pub name: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct MailboxDescription {
     /// Mailbox name
@@ -36,6 +91,11 @@ pub struct MailboxDescription {
     attributes: Vec<MailboxAttribute>,
     /// Hierarchy delimiter character
     delimiter: Option<String>,
+    /// Canonical special-use tag if this mailbox is marked with one of the
+    /// IMAP SPECIAL-USE attributes. Friendly lowercase: "all", "archive",
+    /// "drafts", "flagged", "junk", "sent", "trash", "important". Use this
+    /// instead of pattern-matching mailbox names.
+    special_use: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -57,6 +117,30 @@ pub enum MailboxAttribute {
     /// last time the mailbox was selected.
     Unmarked,
 
+    /// \All: mailbox containing all messages (e.g. Proton's "All Mail").
+    All,
+
+    /// \Archive: archived messages.
+    Archive,
+
+    /// \Drafts: message drafts.
+    Drafts,
+
+    /// \Flagged: flagged/starred messages.
+    Flagged,
+
+    /// \Junk: spam/junk.
+    Junk,
+
+    /// \Sent: sent messages.
+    Sent,
+
+    /// \Trash: deleted/trashed messages.
+    Trash,
+
+    /// \Important: messages marked important.
+    Important,
+
     /// A non-standard user- or server-defined name attribute.
     Custom(String),
 }
@@ -68,7 +152,19 @@ impl From<NameAttribute<'_>> for MailboxAttribute {
             NameAttribute::NoSelect => Self::NoSelect,
             NameAttribute::Marked => Self::Marked,
             NameAttribute::Unmarked => Self::Unmarked,
-            NameAttribute::Extension(cow) => Self::Custom(cow.to_string()),
+            NameAttribute::Extension(cow) => {
+                match cow.trim_start_matches('\\').to_ascii_lowercase().as_str() {
+                    "all" => Self::All,
+                    "archive" => Self::Archive,
+                    "drafts" => Self::Drafts,
+                    "flagged" => Self::Flagged,
+                    "junk" => Self::Junk,
+                    "sent" => Self::Sent,
+                    "trash" => Self::Trash,
+                    "important" => Self::Important,
+                    _ => Self::Custom(cow.to_string()),
+                }
+            }
             other => Self::Custom(format!("{other:?}")),
         }
     }
@@ -76,15 +172,28 @@ impl From<NameAttribute<'_>> for MailboxAttribute {
 
 impl From<&Name> for MailboxDescription {
     fn from(value: &Name) -> Self {
+        let attributes: Vec<MailboxAttribute> = value
+            .attributes()
+            .iter()
+            .cloned()
+            .map(MailboxAttribute::from)
+            .collect();
+        let special_use = attributes.iter().find_map(|attr| match attr {
+            MailboxAttribute::All => Some("all".to_owned()),
+            MailboxAttribute::Archive => Some("archive".to_owned()),
+            MailboxAttribute::Drafts => Some("drafts".to_owned()),
+            MailboxAttribute::Flagged => Some("flagged".to_owned()),
+            MailboxAttribute::Junk => Some("junk".to_owned()),
+            MailboxAttribute::Sent => Some("sent".to_owned()),
+            MailboxAttribute::Trash => Some("trash".to_owned()),
+            MailboxAttribute::Important => Some("important".to_owned()),
+            _ => None,
+        });
         Self {
             name: value.name().to_owned(),
-            attributes: value
-                .attributes()
-                .iter()
-                .cloned()
-                .map(MailboxAttribute::from)
-                .collect(),
+            attributes,
             delimiter: value.delimiter().map(|v| v.to_owned()),
+            special_use,
         }
     }
 }
@@ -132,6 +241,9 @@ pub struct MessageSummary {
     /// Message flags (e.g. Seen, Flagged)
     #[schemars(extend("examples" = ["Seen", "Flagged"]))]
     pub flags: Vec<MessageFlag>,
+    /// First ~150 chars of plain-text body. Only populated when
+    /// `include_snippet` was requested on the list/search call.
+    pub snippet: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -160,6 +272,10 @@ pub struct ListMessagesRequest {
     /// Return messages with UID less than this value (for pagination)
     #[schemars(range(min = 1))]
     pub before_uid: Option<u32>,
+    /// Include a ~150 char plain-text snippet of each message body in the
+    /// response. Increases fetch cost per message — use only when triaging.
+    #[serde(default)]
+    pub include_snippet: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -168,6 +284,9 @@ pub struct ListMessagesResponse {
     pub messages: Vec<MessageSummary>,
     /// Total number of messages in the mailbox
     pub total_in_mailbox: u32,
+    /// Cursor for the next page: pass this as `before_uid` on the next
+    /// list_messages call. `None` means there are no more results.
+    pub next_cursor: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -181,6 +300,11 @@ pub struct GetMessageRequest {
     /// Whether to include the raw HTML body in the response (default: false)
     #[serde(default)]
     pub include_html: bool,
+    /// Optional max characters for body_text. If the body exceeds this, it
+    /// is truncated and `body_text_truncated` is set to true. None = no limit.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub max_body_chars: Option<u32>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -203,6 +327,8 @@ pub struct GetMessageResponse {
     pub body_text: Option<String>,
     /// Raw HTML body (only present when include_html is true)
     pub body_html: Option<String>,
+    /// True if `body_text` was truncated to `max_body_chars`.
+    pub body_text_truncated: bool,
     /// List of attachments
     pub attachments: Vec<AttachmentInfo>,
 }
@@ -220,10 +346,13 @@ pub struct SearchMessagesRequest {
     pub subject: Option<String>,
     /// Search message body text
     pub body: Option<String>,
-    /// Messages since this date (DD-Mon-YYYY format, e.g. "01-Jan-2024")
+    /// Messages on or after this date (inclusive). DD-Mon-YYYY format,
+    /// e.g. "01-Jan-2024". Note the IMAP-specific format — not ISO-8601.
     #[schemars(example = &"01-Jan-2024")]
     pub since: Option<String>,
-    /// Messages before this date (DD-Mon-YYYY format, e.g. "31-Dec-2024")
+    /// Messages strictly before this date (exclusive — a message dated
+    /// "31-Dec-2024" does NOT match before="31-Dec-2024"). DD-Mon-YYYY
+    /// format. Note the IMAP-specific format — not ISO-8601.
     #[schemars(example = &"31-Dec-2024")]
     pub before: Option<String>,
     /// Filter by seen/unseen status
@@ -233,6 +362,10 @@ pub struct SearchMessagesRequest {
     /// Maximum number of results (default 25, max 100)
     #[schemars(range(min = 1, max = 100))]
     pub limit: Option<u32>,
+    /// Include a ~150 char plain-text snippet of each message body in the
+    /// response. Increases fetch cost per message — use only when triaging.
+    #[serde(default)]
+    pub include_snippet: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -241,6 +374,9 @@ pub struct SearchMessagesResponse {
     pub messages: Vec<MessageSummary>,
     /// Total number of messages matching the search criteria
     pub total_matches: u32,
+    /// Cursor for the next page: pass this as `before_uid` on the next
+    /// list_messages call. `None` means there are no more results.
+    pub next_cursor: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -335,9 +471,9 @@ pub struct ListMessagesByThreadResponse {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ArchiveMessageRequest {
-    /// Name of the mailbox containing the message (e.g. "INBOX")
+    /// Name of the mailbox the message is currently in (e.g. "INBOX")
     #[schemars(length(min = 1), example = &"INBOX")]
-    pub mailbox_name: String,
+    pub source_mailbox: String,
     /// UID of the message to archive
     #[schemars(range(min = 1))]
     pub uid: u32,
@@ -408,9 +544,9 @@ pub struct MoveMessageResponse {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MarkAsReadRequest {
-    /// Name of the mailbox containing the message (e.g. "INBOX")
+    /// Name of the mailbox the message is currently in (e.g. "INBOX")
     #[schemars(length(min = 1), example = &"INBOX")]
-    pub mailbox_name: String,
+    pub source_mailbox: String,
     /// UID of the message to mark
     #[schemars(range(min = 1))]
     pub uid: u32,
@@ -428,7 +564,7 @@ pub struct MarkAsReadResponse {
     /// UID of the message
     pub uid: u32,
     /// Mailbox the message is in
-    pub mailbox_name: String,
+    pub source_mailbox: String,
     /// Whether the message is now marked as read
     pub read: bool,
 }
@@ -516,12 +652,19 @@ fn parse_address_header(header: &mailparse::MailHeader) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn extract_summaries(fetches: &[Fetch]) -> Vec<MessageSummary> {
+fn extract_summaries(fetches: &[Fetch], include_snippet: bool) -> Vec<MessageSummary> {
     fetches
         .iter()
         .filter_map(|fetch| {
             let uid = fetch.uid?;
-            let (headers, _) = mailparse::parse_headers(fetch.header()?).ok()?;
+            let (headers, snippet) = if include_snippet {
+                let raw = fetch.body()?;
+                let (headers, _) = mailparse::parse_headers(raw).ok()?;
+                (headers, build_snippet(raw))
+            } else {
+                let (headers, _) = mailparse::parse_headers(fetch.header()?).ok()?;
+                (headers, None)
+            };
 
             let subject = headers.get_first_value("Subject");
             let date = headers.get_first_value("Date");
@@ -537,9 +680,22 @@ fn extract_summaries(fetches: &[Fetch]) -> Vec<MessageSummary> {
                 from,
                 date,
                 flags,
+                snippet,
             })
         })
         .collect()
+}
+
+fn build_snippet(raw: &[u8]) -> Option<String> {
+    let parsed = mailparse::parse_mail(raw).ok()?;
+    let (text, html) = extract_body_parts(&parsed);
+    let plain = text.or_else(|| html.and_then(|h| html2text::from_read(h.as_bytes(), 80).ok()))?;
+    let collapsed: String = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed.chars().take(150).collect())
+    }
 }
 
 fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<String>) {
@@ -613,6 +769,14 @@ fn collect_attachment_parts<'a>(
     }
 }
 
+fn attachment_part_filename(part: &mailparse::ParsedMail<'_>) -> Option<String> {
+    part.get_content_disposition()
+        .params
+        .get("filename")
+        .or_else(|| part.ctype.params.get("name"))
+        .cloned()
+}
+
 fn extract_attachment_by_index(
     raw: &[u8],
     index: usize,
@@ -622,18 +786,22 @@ fn extract_attachment_by_index(
     collect_attachment_parts(&parsed, &mut parts);
 
     let part = parts.get(index).ok_or_else(|| {
+        let listing = parts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let name = attachment_part_filename(p).unwrap_or_else(|| "<unnamed>".into());
+                format!("[{i}] {name} ({})", p.ctype.mimetype)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         format!(
-            "Attachment index {index} out of range (message has {} attachments)",
+            "Attachment index {index} out of range (message has {} attachments): {listing}",
             parts.len()
         )
     })?;
 
-    let disposition = part.get_content_disposition();
-    let filename = disposition
-        .params
-        .get("filename")
-        .or_else(|| part.ctype.params.get("name"))
-        .cloned();
+    let filename = attachment_part_filename(part);
     let mime_type = part.ctype.mimetype.clone();
     let body = part.get_body_raw().map_err(|e| e.to_string())?;
 
@@ -642,6 +810,57 @@ fn extract_attachment_by_index(
 
 fn escape_search_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr: Vec<usize> = vec![0; b.len() + 1];
+    for i in 1..=a.len() {
+        curr[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
+fn format_uid_not_found(mailbox: &str, uid: u32, uid_next: Option<u32>) -> String {
+    let base = format!("Message with UID {uid} not found in mailbox \"{mailbox}\".");
+    match uid_next {
+        Some(next) if uid >= next => format!(
+            "{base} UIDNEXT is {next}, so this UID has never been assigned in this mailbox \
+             (try list_messages to see current UIDs)."
+        ),
+        Some(next) => format!(
+            "{base} UIDNEXT is {next}, so the UID was valid at some point but the message \
+             was likely moved or deleted."
+        ),
+        None => base,
+    }
+}
+
+fn closest_mailbox<'a>(requested: &str, names: &'a [String]) -> Option<&'a String> {
+    let req_lower = requested.to_lowercase();
+    if let Some(exact) = names.iter().find(|n| n.to_lowercase() == req_lower) {
+        return Some(exact);
+    }
+    let threshold = (requested.chars().count() / 3).max(2);
+    names
+        .iter()
+        .map(|n| (levenshtein(&n.to_lowercase(), &req_lower), n))
+        .filter(|(d, _)| *d <= threshold)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, n)| n)
 }
 
 fn build_search_query(req: &SearchMessagesRequest) -> String {
@@ -847,17 +1066,125 @@ impl EmailClient {
         Ok(ListMailboxesResponse(mailboxes))
     }
 
+    #[instrument(skip(self), fields(kind = ?req.kind))]
+    pub async fn resolve_special_mailbox(
+        &mut self,
+        req: ResolveSpecialMailboxRequest,
+    ) -> Result<ResolveSpecialMailboxResponse, String> {
+        if req.kind == SpecialMailbox::Inbox {
+            return Ok(ResolveSpecialMailboxResponse {
+                kind: req.kind,
+                name: "INBOX".into(),
+            });
+        }
+
+        let ListMailboxesResponse(mailboxes) = self.list_mailboxes().await?;
+        let found = mailboxes
+            .iter()
+            .find(|mb| {
+                mb.special_use
+                    .as_deref()
+                    .is_some_and(|tag| req.kind.matches_tag(tag))
+            })
+            .map(|mb| mb.name.clone());
+
+        match found {
+            Some(name) => {
+                debug!(name = %name, "resolved special mailbox");
+                Ok(ResolveSpecialMailboxResponse {
+                    kind: req.kind,
+                    name,
+                })
+            }
+            None => {
+                let available: Vec<String> = mailboxes
+                    .iter()
+                    .filter_map(|mb| {
+                        mb.special_use
+                            .as_ref()
+                            .map(|t| format!("{t}=\"{}\"", mb.name))
+                    })
+                    .collect();
+                let hint = if available.is_empty() {
+                    "No mailboxes with SPECIAL-USE attributes were reported by the server.".into()
+                } else {
+                    format!("Available special-use tags: [{}]", available.join(", "))
+                };
+                Err(format!(
+                    "No mailbox is tagged with the SPECIAL-USE attribute for {:?}. {hint}",
+                    req.kind
+                ))
+            }
+        }
+    }
+
+    async fn list_selectable_mailbox_names(&mut self) -> Vec<String> {
+        let stream = match self.session.list(None, Some("*")).await {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stream
+            .try_collect::<Vec<Name>>()
+            .await
+            .ok()
+            .map(|names| {
+                names
+                    .iter()
+                    .filter(|n| {
+                        !n.attributes()
+                            .iter()
+                            .any(|a| matches!(a, NameAttribute::NoSelect))
+                    })
+                    .map(|n| n.name().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn format_select_error(&mut self, requested: &str, imap_err: String) -> String {
+        let names = self.list_selectable_mailbox_names().await;
+        let mut msg = format!("Mailbox \"{requested}\" not found or not selectable.");
+        if let Some(suggestion) = closest_mailbox(requested, &names) {
+            msg.push_str(&format!(" Did you mean \"{suggestion}\"?"));
+        }
+        if !names.is_empty() {
+            let listed = names
+                .iter()
+                .map(|n| format!("\"{n}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            msg.push_str(&format!(" Available mailboxes: [{listed}]."));
+        }
+        msg.push_str(&format!(" (IMAP: {imap_err})"));
+        msg
+    }
+
+    async fn examine_or_suggest(&mut self, mailbox_name: &str) -> Result<Mailbox, String> {
+        match self.session.examine(mailbox_name).await {
+            Ok(mb) => Ok(mb),
+            Err(e) => Err(self.format_select_error(mailbox_name, e.to_string()).await),
+        }
+    }
+
+    async fn select_or_suggest(&mut self, mailbox_name: &str) -> Result<Mailbox, String> {
+        match self.session.select(mailbox_name).await {
+            Ok(mb) => Ok(mb),
+            Err(e) => Err(self.format_select_error(mailbox_name, e.to_string()).await),
+        }
+    }
+
     #[instrument(skip(self), fields(mailbox = %req.mailbox_name, limit = req.limit, before_uid = ?req.before_uid))]
     pub async fn list_messages(
         &mut self,
         req: ListMessagesRequest,
     ) -> Result<ListMessagesResponse, String> {
         let limit = req.limit.min(100);
-        let mailbox = self
-            .session
-            .examine(&req.mailbox_name)
-            .await
-            .map_err(|e| e.to_string())?;
+        let fetch_spec = if req.include_snippet {
+            FETCH_HEADERS_AND_BODY
+        } else {
+            FETCH_HEADERS
+        };
+        let mailbox = self.examine_or_suggest(&req.mailbox_name).await?;
         let total = mailbox.exists;
         debug!(total, "examined mailbox");
 
@@ -865,6 +1192,7 @@ impl EmailClient {
             return Ok(ListMessagesResponse {
                 messages: Vec::new(),
                 total_in_mailbox: total,
+                next_cursor: None,
             });
         }
 
@@ -874,6 +1202,7 @@ impl EmailClient {
                     return Ok(ListMessagesResponse {
                         messages: Vec::new(),
                         total_in_mailbox: total,
+                        next_cursor: None,
                     });
                 }
                 let uids = self
@@ -886,6 +1215,7 @@ impl EmailClient {
                     return Ok(ListMessagesResponse {
                         messages: Vec::new(),
                         total_in_mailbox: total,
+                        next_cursor: None,
                     });
                 }
 
@@ -900,7 +1230,7 @@ impl EmailClient {
                     .join(",");
 
                 self.session
-                    .uid_fetch(uid_set, FETCH_HEADERS)
+                    .uid_fetch(uid_set, fetch_spec)
                     .await
                     .map_err(|e| e.to_string())?
                     .try_collect()
@@ -910,7 +1240,7 @@ impl EmailClient {
             None => {
                 let start = total.saturating_sub(limit).saturating_add(1);
                 self.session
-                    .fetch(format!("{start}:{total}"), FETCH_HEADERS)
+                    .fetch(format!("{start}:{total}"), fetch_spec)
                     .await
                     .map_err(|e| e.to_string())?
                     .try_collect()
@@ -919,13 +1249,20 @@ impl EmailClient {
             }
         };
 
-        let mut messages = extract_summaries(&fetches);
+        let mut messages = extract_summaries(&fetches, req.include_snippet);
         messages.sort_by_key(|a| std::cmp::Reverse(a.uid));
         debug!(returned = messages.len(), "fetched messages");
+
+        let next_cursor = if messages.len() == limit as usize {
+            messages.iter().map(|m| m.uid).min()
+        } else {
+            None
+        };
 
         Ok(ListMessagesResponse {
             messages,
             total_in_mailbox: total,
+            next_cursor,
         })
     }
 
@@ -934,10 +1271,7 @@ impl EmailClient {
         &mut self,
         req: GetMessageRequest,
     ) -> Result<GetMessageResponse, String> {
-        self.session
-            .examine(&req.mailbox_name)
-            .await
-            .map_err(|e| e.to_string())?;
+        let mailbox = self.examine_or_suggest(&req.mailbox_name).await?;
 
         let fetches: Vec<Fetch> = self
             .session
@@ -950,7 +1284,7 @@ impl EmailClient {
 
         let fetch = fetches
             .first()
-            .ok_or_else(|| format!("Message with UID {} not found", req.uid))?;
+            .ok_or_else(|| format_uid_not_found(&req.mailbox_name, req.uid, mailbox.uid_next))?;
 
         let raw = fetch.body().ok_or("Message has no body")?;
         let parsed = mailparse::parse_mail(raw).map_err(|e| e.to_string())?;
@@ -984,10 +1318,20 @@ impl EmailClient {
             body_text = html2text::from_read(html.as_bytes(), 80).ok();
         }
 
+        let mut body_text_truncated = false;
+        if let (Some(max), Some(text)) = (req.max_body_chars, body_text.as_mut()) {
+            let max = max as usize;
+            if text.chars().count() > max {
+                *text = text.chars().take(max).collect();
+                body_text_truncated = true;
+            }
+        }
+
         debug!(
             has_text = body_text.is_some(),
             has_html = body_html.is_some(),
             attachment_count = attachments.len(),
+            body_text_truncated,
             "fetched message"
         );
 
@@ -1001,6 +1345,7 @@ impl EmailClient {
             flags,
             body_text,
             body_html: if req.include_html { body_html } else { None },
+            body_text_truncated,
             attachments,
         })
     }
@@ -1011,10 +1356,12 @@ impl EmailClient {
         req: SearchMessagesRequest,
     ) -> Result<SearchMessagesResponse, String> {
         let limit = req.limit.unwrap_or(25).min(100);
-        self.session
-            .examine(&req.mailbox_name)
-            .await
-            .map_err(|e| e.to_string())?;
+        let fetch_spec = if req.include_snippet {
+            FETCH_HEADERS_AND_BODY
+        } else {
+            FETCH_HEADERS
+        };
+        self.examine_or_suggest(&req.mailbox_name).await?;
 
         let query = build_search_query(&req);
         debug!(query = %query, "executing IMAP search");
@@ -1030,6 +1377,7 @@ impl EmailClient {
             return Ok(SearchMessagesResponse {
                 messages: Vec::new(),
                 total_matches: 0,
+                next_cursor: None,
             });
         }
 
@@ -1045,19 +1393,27 @@ impl EmailClient {
 
         let fetches: Vec<Fetch> = self
             .session
-            .uid_fetch(uid_set, FETCH_HEADERS)
+            .uid_fetch(uid_set, fetch_spec)
             .await
             .map_err(|e| e.to_string())?
             .try_collect()
             .await
             .map_err(|e| e.to_string())?;
 
-        let mut messages = extract_summaries(&fetches);
+        let mut messages = extract_summaries(&fetches, req.include_snippet);
         messages.sort_by_key(|a| std::cmp::Reverse(a.uid));
+
+        let next_cursor =
+            if messages.len() == limit as usize && total_matches > messages.len() as u32 {
+                messages.iter().map(|m| m.uid).min()
+            } else {
+                None
+            };
 
         Ok(SearchMessagesResponse {
             messages,
             total_matches,
+            next_cursor,
         })
     }
 
@@ -1066,11 +1422,7 @@ impl EmailClient {
         &mut self,
         req: GetMailboxStatusRequest,
     ) -> Result<GetMailboxStatusResponse, String> {
-        let mailbox = self
-            .session
-            .examine(&req.mailbox_name)
-            .await
-            .map_err(|e| e.to_string())?;
+        let mailbox = self.examine_or_suggest(&req.mailbox_name).await?;
 
         let unseen = self
             .session
@@ -1100,10 +1452,7 @@ impl EmailClient {
         &mut self,
         req: GetAttachmentRequest,
     ) -> Result<GetAttachmentResponse, String> {
-        self.session
-            .examine(&req.mailbox_name)
-            .await
-            .map_err(|e| e.to_string())?;
+        let mailbox = self.examine_or_suggest(&req.mailbox_name).await?;
 
         let fetches: Vec<Fetch> = self
             .session
@@ -1116,7 +1465,7 @@ impl EmailClient {
 
         let fetch = fetches
             .first()
-            .ok_or_else(|| format!("Message with UID {} not found", req.uid))?;
+            .ok_or_else(|| format_uid_not_found(&req.mailbox_name, req.uid, mailbox.uid_next))?;
 
         let raw = fetch.body().ok_or("Message has no body")?;
 
@@ -1135,15 +1484,12 @@ impl EmailClient {
         })
     }
 
-    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = req.uid))]
+    #[instrument(skip(self), fields(source = %req.source_mailbox, uid = req.uid))]
     pub async fn archive_message(
         &mut self,
         req: ArchiveMessageRequest,
     ) -> Result<ArchiveMessageResponse, String> {
-        self.session
-            .select(&req.mailbox_name)
-            .await
-            .map_err(|e| e.to_string())?;
+        self.select_or_suggest(&req.source_mailbox).await?;
 
         self.session
             .uid_mv(req.uid.to_string(), "Archive")
@@ -1154,7 +1500,7 @@ impl EmailClient {
 
         Ok(ArchiveMessageResponse {
             uid: req.uid,
-            source_mailbox: req.mailbox_name,
+            source_mailbox: req.source_mailbox,
             destination_mailbox: "Archive".into(),
         })
     }
@@ -1164,10 +1510,7 @@ impl EmailClient {
         &mut self,
         req: TrashMessageRequest,
     ) -> Result<TrashMessageResponse, String> {
-        self.session
-            .select(&req.source_mailbox)
-            .await
-            .map_err(|e| e.to_string())?;
+        self.select_or_suggest(&req.source_mailbox).await?;
 
         self.session
             .uid_mv(req.uid.to_string(), "Trash")
@@ -1192,10 +1535,7 @@ impl EmailClient {
             return Err("Moving messages to Trash is not allowed via this tool. Use the trash_message tool instead.".into());
         }
 
-        self.session
-            .select(&req.source_mailbox)
-            .await
-            .map_err(|e| e.to_string())?;
+        self.select_or_suggest(&req.source_mailbox).await?;
 
         self.session
             .uid_mv(req.uid.to_string(), &req.destination_mailbox)
@@ -1211,15 +1551,12 @@ impl EmailClient {
         })
     }
 
-    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = req.uid, read = req.read))]
+    #[instrument(skip(self), fields(source = %req.source_mailbox, uid = req.uid, read = req.read))]
     pub async fn mark_as_read(
         &mut self,
         req: MarkAsReadRequest,
     ) -> Result<MarkAsReadResponse, String> {
-        self.session
-            .select(&req.mailbox_name)
-            .await
-            .map_err(|e| e.to_string())?;
+        self.select_or_suggest(&req.source_mailbox).await?;
 
         let flag_op = if req.read { "+FLAGS" } else { "-FLAGS" };
         self.session
@@ -1237,7 +1574,7 @@ impl EmailClient {
 
         Ok(MarkAsReadResponse {
             uid: req.uid,
-            mailbox_name: req.mailbox_name,
+            source_mailbox: req.source_mailbox,
             read: req.read,
         })
     }
@@ -1263,10 +1600,7 @@ impl EmailClient {
         let threaded = thread_headers.is_some();
         let (raw, message_id) = build_draft_rfc5322(&from, &req, thread_headers.as_ref())?;
 
-        self.session
-            .select(&req.drafts_mailbox)
-            .await
-            .map_err(|e| e.to_string())?;
+        self.select_or_suggest(&req.drafts_mailbox).await?;
 
         self.session
             .append(&req.drafts_mailbox, Some("(\\Draft \\Seen)"), None, &raw)
@@ -1287,10 +1621,7 @@ impl EmailClient {
         mailbox_name: &str,
         uid: u32,
     ) -> Result<Option<ThreadHeaders>, String> {
-        self.session
-            .examine(mailbox_name)
-            .await
-            .map_err(|e| e.to_string())?;
+        self.examine_or_suggest(mailbox_name).await?;
 
         let fetches: Vec<Fetch> = self
             .session
@@ -1348,10 +1679,7 @@ impl EmailClient {
             return Err("At least one of message_id or subject must be provided".into());
         }
 
-        self.session
-            .examine(&req.mailbox_name)
-            .await
-            .map_err(|e| e.to_string())?;
+        self.examine_or_suggest(&req.mailbox_name).await?;
 
         let mut all_uids = HashSet::new();
 
@@ -1577,7 +1905,7 @@ mod tests {
     #[test]
     fn archive_message_request_schema() {
         let schema = serde_json::to_value(schema_for!(ArchiveMessageRequest)).unwrap();
-        let mailbox = get_property(&schema, "mailbox_name");
+        let mailbox = get_property(&schema, "source_mailbox");
         assert_eq!(mailbox["minLength"], 1);
 
         let uid = get_property(&schema, "uid");
@@ -1612,7 +1940,7 @@ mod tests {
     #[test]
     fn mark_as_read_request_schema() {
         let schema = serde_json::to_value(schema_for!(MarkAsReadRequest)).unwrap();
-        let mailbox = get_property(&schema, "mailbox_name");
+        let mailbox = get_property(&schema, "source_mailbox");
         assert_eq!(mailbox["minLength"], 1);
         assert!(
             mailbox["examples"]
@@ -1634,7 +1962,7 @@ mod tests {
     #[test]
     fn mark_as_read_request_defaults_to_true() {
         let req: MarkAsReadRequest =
-            serde_json::from_str(r#"{"mailbox_name": "INBOX", "uid": 1}"#).unwrap();
+            serde_json::from_str(r#"{"source_mailbox": "INBOX", "uid": 1}"#).unwrap();
         assert!(req.read, "read should default to true");
     }
 
@@ -1720,7 +2048,7 @@ mod tests {
         check_descriptions(
             serde_json::to_value(schema_for!(MarkAsReadResponse)).unwrap(),
             "MarkAsReadResponse",
-            &["uid", "mailbox_name", "read"],
+            &["uid", "source_mailbox", "read"],
         );
     }
 

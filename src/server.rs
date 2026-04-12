@@ -12,7 +12,8 @@ use tracing::{error, info};
 use crate::email_client::{
     ArchiveMessageRequest, DraftEmailRequest, EmailClient, GetAttachmentRequest,
     GetMailboxStatusRequest, GetMessageRequest, ListMessagesByThreadRequest, ListMessagesRequest,
-    MarkAsReadRequest, MoveMessageRequest, SearchMessagesRequest, TrashMessageRequest,
+    MarkAsReadRequest, MoveMessageRequest, ResolveSpecialMailboxRequest, SearchMessagesRequest,
+    TrashMessageRequest,
 };
 
 #[derive(Clone)]
@@ -32,7 +33,7 @@ impl ProtonMailService {
 
     #[tool(
         title = "List Mailboxes",
-        description = "List all mailboxes in the Proton Mail account",
+        description = "List all mailboxes in the Proton Mail account. Each entry includes a `special_use` tag (\"inbox\", \"archive\", \"sent\", \"drafts\", \"trash\", \"junk\", \"all\", \"flagged\", \"important\") when the server marks the folder with an IMAP SPECIAL-USE attribute — use that instead of pattern-matching mailbox names.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn list_mailboxes(&self) -> Result<String, String> {
@@ -40,6 +41,24 @@ impl ProtonMailService {
         let mut client = self.client.lock().await;
         let result = client.list_mailboxes().await.map_err(|e| {
             error!(error = %e, "tool.list_mailboxes failed");
+            e
+        })?;
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        title = "Resolve Special Mailbox",
+        description = "Resolve a well-known folder kind (inbox, archive, sent, drafts, trash, spam, all_mail, flagged, important) to its actual IMAP mailbox name. Use this to avoid guessing folder names — Proton exposes the canonical mapping via IMAP SPECIAL-USE attributes. Returns the name you can pass to any mailbox_name/source_mailbox parameter on other tools.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn resolve_special_mailbox(
+        &self,
+        Parameters(req): Parameters<ResolveSpecialMailboxRequest>,
+    ) -> Result<String, String> {
+        info!(kind = ?req.kind, "tool.resolve_special_mailbox");
+        let mut client = self.client.lock().await;
+        let result = client.resolve_special_mailbox(req).await.map_err(|e| {
+            error!(error = %e, "tool.resolve_special_mailbox failed");
             e
         })?;
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
@@ -137,9 +156,10 @@ impl ProtonMailService {
 
     #[tool(
         title = "Archive Message",
-        description = "Move a message to the Archive mailbox by UID. Requires the source mailbox name and the message UID.",
+        description = "Move a message to the Archive mailbox by UID. Prefer this over move_message when the user wants to archive — it finds the canonical Archive folder automatically and is the right choice for the common 'get this out of my inbox' case.",
         annotations(
             read_only_hint = false,
+            destructive_hint = true,
             idempotent_hint = false,
             open_world_hint = false
         )
@@ -148,7 +168,7 @@ impl ProtonMailService {
         &self,
         Parameters(req): Parameters<ArchiveMessageRequest>,
     ) -> Result<String, String> {
-        info!(mailbox = %req.mailbox_name, uid = req.uid, "tool.archive_message");
+        info!(source = %req.source_mailbox, uid = req.uid, "tool.archive_message");
         let mut client = self.client.lock().await;
         let result = client.archive_message(req).await.map_err(|e| {
             error!(error = %e, "tool.archive_message failed");
@@ -159,9 +179,10 @@ impl ProtonMailService {
 
     #[tool(
         title = "Trash Message",
-        description = "Move a message to the Trash mailbox by UID. Requires the source mailbox name and the message UID.",
+        description = "Move a message to the Trash mailbox by UID. Use this whenever the user wants to delete a message — move_message cannot target Trash. The message is not permanently deleted; Proton will purge it according to its own retention policy.",
         annotations(
             read_only_hint = false,
+            destructive_hint = true,
             idempotent_hint = false,
             open_world_hint = false
         )
@@ -181,9 +202,10 @@ impl ProtonMailService {
 
     #[tool(
         title = "Move Message",
-        description = "Move a message to a different mailbox by UID. Requires the source mailbox, destination mailbox, and message UID. Moving to Trash is blocked — use the trash_message tool instead.",
+        description = "Move a message to an arbitrary destination mailbox by UID. Use this only for custom/user-created folders — for the common cases prefer archive_message (Archive) or trash_message (Trash). Moving to Trash is blocked here.",
         annotations(
             read_only_hint = false,
+            destructive_hint = true,
             idempotent_hint = false,
             open_world_hint = false
         )
@@ -214,7 +236,7 @@ impl ProtonMailService {
         &self,
         Parameters(req): Parameters<MarkAsReadRequest>,
     ) -> Result<String, String> {
-        info!(mailbox = %req.mailbox_name, uid = req.uid, read = req.read, "tool.mark_as_read");
+        info!(source = %req.source_mailbox, uid = req.uid, read = req.read, "tool.mark_as_read");
         let mut client = self.client.lock().await;
         let result = client.mark_as_read(req).await.map_err(|e| {
             error!(error = %e, "tool.mark_as_read failed");
@@ -288,13 +310,14 @@ impl ServerHandler for ProtonMailService {
                 "Cannot: send messages or manage mailboxes. Drafts are saved for the user to send manually.\n",
                 "\n",
                 "Key conventions:\n",
-                "- Messages are identified by UID + mailbox_name (e.g. \"INBOX\")\n",
-                "- Use list_mailboxes to discover available mailbox names\n",
-                "- Use list_messages or search_messages to find UIDs, then get_message for full content\n",
-                "- Pagination: pass the lowest UID from results as before_uid for the next page\n",
-                "- Dates in search use DD-Mon-YYYY format (e.g. \"01-Jan-2024\")\n",
-                "- get_message does not mark messages as read; use mark_as_read separately\n",
-                "- draft_email writes to the Drafts mailbox; to reply, pass in_reply_to with the source mailbox and UID",
+                "- Messages are identified by UID + a mailbox name (e.g. \"INBOX\"). Read-only tools call the parameter `mailbox_name`; mutating tools (archive/trash/move/mark_as_read) call it `source_mailbox`.\n",
+                "- Mailbox names are case-sensitive and server-defined. If you don't already know the exact name, call list_mailboxes first — use the `special_use` field on each entry (\"inbox\", \"archive\", \"sent\", \"drafts\", \"trash\", \"junk\", \"all\") to find canonical folders instead of string-matching on names.\n",
+                "- UIDs are stable only within a mailbox + uid_validity pair. Don't reuse a UID across mailboxes.\n",
+                "- Use list_messages or search_messages to find UIDs, then get_message for full content. Prefer search_messages with specific filters over list_messages + scanning when you know what you're looking for.\n",
+                "- Pagination: list_messages and search_messages return a `next_cursor` field — pass it as `before_uid` on the next call. `None` means end of results.\n",
+                "- Dates in search use DD-Mon-YYYY format (e.g. \"01-Jan-2024\"). `since` is inclusive, `before` is exclusive.\n",
+                "- get_message does not mark messages as read; use mark_as_read separately.\n",
+                "- draft_email writes to the Drafts mailbox; to reply, pass in_reply_to with the source mailbox and UID. Sending is not supported.",
             ).into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {

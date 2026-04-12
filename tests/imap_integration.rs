@@ -56,6 +56,7 @@ async fn test_list_messages() {
             mailbox_name: "INBOX".into(),
             limit: 25,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -94,6 +95,7 @@ async fn test_list_messages_pagination() {
             mailbox_name: "INBOX".into(),
             limit: 3,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -106,6 +108,7 @@ async fn test_list_messages_pagination() {
             mailbox_name: "INBOX".into(),
             limit: 3,
             before_uid: Some(lowest_uid),
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -144,6 +147,7 @@ async fn test_get_message_text() {
             mailbox_name: "INBOX".into(),
             limit: 1,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -154,6 +158,7 @@ async fn test_get_message_text() {
             mailbox_name: "INBOX".into(),
             uid,
             include_html: false,
+            max_body_chars: None,
         })
         .await
         .unwrap();
@@ -198,6 +203,7 @@ async fn test_get_message_html() {
             mailbox_name: "INBOX".into(),
             limit: 1,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -208,6 +214,7 @@ async fn test_get_message_html() {
             mailbox_name: "INBOX".into(),
             uid,
             include_html: false,
+            max_body_chars: None,
         })
         .await
         .unwrap();
@@ -259,6 +266,7 @@ async fn test_search_by_subject() {
             seen: None,
             flagged: None,
             limit: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -308,6 +316,7 @@ async fn test_search_by_from() {
             seen: None,
             flagged: None,
             limit: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -379,6 +388,7 @@ async fn test_get_attachment() {
             mailbox_name: "INBOX".into(),
             limit: 1,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -487,6 +497,7 @@ async fn test_archive_message() {
             mailbox_name: "INBOX".into(),
             limit: 1,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -494,7 +505,7 @@ async fn test_archive_message() {
 
     let resp = client
         .archive_message(ArchiveMessageRequest {
-            mailbox_name: "INBOX".into(),
+            source_mailbox: "INBOX".into(),
             uid,
             subject: None,
         })
@@ -517,6 +528,7 @@ async fn test_archive_message() {
             mailbox_name: "Archive".into(),
             limit: 10,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -543,6 +555,7 @@ async fn test_trash_message() {
             mailbox_name: "INBOX".into(),
             limit: 1,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -572,6 +585,7 @@ async fn test_trash_message() {
             mailbox_name: "Trash".into(),
             limit: 10,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -598,6 +612,7 @@ async fn test_move_message() {
             mailbox_name: "INBOX".into(),
             limit: 1,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -629,6 +644,7 @@ async fn test_move_message() {
             mailbox_name: "CustomFolder".into(),
             limit: 10,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -654,6 +670,7 @@ async fn test_move_to_trash_blocked() {
             mailbox_name: "INBOX".into(),
             limit: 1,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -691,6 +708,7 @@ async fn test_mark_as_read() {
             mailbox_name: "INBOX".into(),
             limit: 1,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -706,7 +724,7 @@ async fn test_mark_as_read() {
 
     let resp = client
         .mark_as_read(MarkAsReadRequest {
-            mailbox_name: "INBOX".into(),
+            source_mailbox: "INBOX".into(),
             uid,
             read: true,
         })
@@ -742,6 +760,7 @@ async fn test_mark_as_unread() {
             mailbox_name: "INBOX".into(),
             limit: 1,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -749,7 +768,7 @@ async fn test_mark_as_unread() {
 
     client
         .mark_as_read(MarkAsReadRequest {
-            mailbox_name: "INBOX".into(),
+            source_mailbox: "INBOX".into(),
             uid,
             read: true,
         })
@@ -758,7 +777,7 @@ async fn test_mark_as_unread() {
 
     let resp = client
         .mark_as_read(MarkAsReadRequest {
-            mailbox_name: "INBOX".into(),
+            source_mailbox: "INBOX".into(),
             uid,
             read: false,
         })
@@ -815,6 +834,7 @@ async fn test_draft_email_basic() {
             mailbox_name: "Drafts".into(),
             limit: 10,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -832,6 +852,7 @@ async fn test_draft_email_basic() {
             mailbox_name: "Drafts".into(),
             uid: summary.uid,
             include_html: false,
+            max_body_chars: None,
         })
         .await
         .unwrap();
@@ -882,6 +903,7 @@ async fn test_draft_email_reply_threading() {
             mailbox_name: "INBOX".into(),
             limit: 1,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -963,6 +985,7 @@ async fn test_draft_email_from_override() {
             mailbox_name: "Drafts".into(),
             limit: 1,
             before_uid: None,
+            include_snippet: false,
         })
         .await
         .unwrap();
@@ -973,6 +996,7 @@ async fn test_draft_email_from_override() {
             mailbox_name: "Drafts".into(),
             uid,
             include_html: false,
+            max_body_chars: None,
         })
         .await
         .unwrap();
