@@ -1,0 +1,8 @@
+target
+infra
+tests
+.git
+.github
+.vscode
+*.md
+.mcp.json
