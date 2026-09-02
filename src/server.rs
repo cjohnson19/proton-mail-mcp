@@ -12,8 +12,8 @@ use tracing::{error, info};
 use crate::email_client::{
     ArchiveMessageRequest, DraftEmailRequest, EmailClient, GetAttachmentRequest,
     GetMailboxStatusRequest, GetMessageRequest, ListMessagesByThreadRequest, ListMessagesRequest,
-    MarkAsReadRequest, MoveMessageRequest, ResolveSpecialMailboxRequest, SearchMessagesRequest,
-    SetFlaggedRequest, TrashMessageRequest,
+    MarkAsReadRequest, MessageBatchRequest, MoveMessageRequest, MoveMessagesRequest,
+    ResolveSpecialMailboxRequest, SearchMessagesRequest, SetFlaggedRequest, TrashMessageRequest,
 };
 
 #[derive(Clone)]
@@ -156,7 +156,7 @@ impl ProtonMailService {
 
     #[tool(
         title = "Archive Message",
-        description = "Move a message to the Archive mailbox by UID. Prefer this over move_message when the user wants to archive — it finds the canonical Archive folder automatically and is the right choice for the common 'get this out of my inbox' case.",
+        description = "Move a message to the Archive mailbox by UID. Prefer this over move_message when the user wants to archive — it finds the canonical Archive folder automatically and is the right choice for the common 'get this out of my inbox' case. To archive several messages at once, use archive_messages instead.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -179,7 +179,7 @@ impl ProtonMailService {
 
     #[tool(
         title = "Trash Message",
-        description = "Move a message to the Trash mailbox by UID. Use this whenever the user wants to delete a message — move_message cannot target Trash. The message is not permanently deleted; Proton will purge it according to its own retention policy.",
+        description = "Move a message to the Trash mailbox by UID. Use this whenever the user wants to delete a message — move_message cannot target Trash. The message is not permanently deleted; Proton will purge it according to its own retention policy. To trash several messages at once, use trash_messages instead.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -201,8 +201,54 @@ impl ProtonMailService {
     }
 
     #[tool(
+        title = "Archive Messages",
+        description = "Move several messages from one mailbox to Archive in a single operation. Prefer this over repeated archive_message calls whenever more than one message is involved (e.g. after a search). Returns `moved` (UIDs that were archived) and `not_found` (UIDs that no longer existed in the source mailbox).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn archive_messages(
+        &self,
+        Parameters(req): Parameters<MessageBatchRequest>,
+    ) -> Result<String, String> {
+        info!(source = %req.source_mailbox, count = req.messages.len(), "tool.archive_messages");
+        let mut client = self.client.lock().await;
+        let result = client.archive_messages(req).await.map_err(|e| {
+            error!(error = %e, "tool.archive_messages failed");
+            e
+        })?;
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        title = "Trash Messages",
+        description = "Move several messages from one mailbox to Trash in a single operation. Prefer this over repeated trash_message calls whenever more than one message is involved (e.g. after a search). Messages are not permanently deleted. Returns `moved` (UIDs that were trashed) and `not_found` (UIDs that no longer existed in the source mailbox).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn trash_messages(
+        &self,
+        Parameters(req): Parameters<MessageBatchRequest>,
+    ) -> Result<String, String> {
+        info!(source = %req.source_mailbox, count = req.messages.len(), "tool.trash_messages");
+        let mut client = self.client.lock().await;
+        let result = client.trash_messages(req).await.map_err(|e| {
+            error!(error = %e, "tool.trash_messages failed");
+            e
+        })?;
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
         title = "Move Message",
-        description = "Move a message to an arbitrary destination mailbox by UID. Use this only for custom/user-created folders — for the common cases prefer archive_message (Archive) or trash_message (Trash). Moving to Trash is blocked here.",
+        description = "Move a message to an arbitrary destination mailbox by UID. Use this only for custom/user-created folders — for the common cases prefer archive_message (Archive) or trash_message (Trash). Moving to Trash is blocked here. To move several messages at once, use move_messages instead.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -218,6 +264,29 @@ impl ProtonMailService {
         let mut client = self.client.lock().await;
         let result = client.move_message(req).await.map_err(|e| {
             error!(error = %e, "tool.move_message failed");
+            e
+        })?;
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        title = "Move Messages",
+        description = "Move several messages from one mailbox to an arbitrary destination mailbox in a single operation. Use this for custom/user-created folders — for Archive or Trash prefer archive_messages / trash_messages. Moving to Trash is blocked here. Returns `moved` (UIDs that were moved) and `not_found` (UIDs that no longer existed in the source mailbox).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn move_messages(
+        &self,
+        Parameters(req): Parameters<MoveMessagesRequest>,
+    ) -> Result<String, String> {
+        info!(source = %req.source_mailbox, destination = %req.destination_mailbox, count = req.messages.len(), "tool.move_messages");
+        let mut client = self.client.lock().await;
+        let result = client.move_messages(req).await.map_err(|e| {
+            error!(error = %e, "tool.move_messages failed");
             e
         })?;
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
@@ -326,7 +395,7 @@ impl ServerHandler for ProtonMailService {
                 "- Read full message content (text auto-extracted from HTML)\n",
                 "- Download attachments (base64-encoded)\n",
                 "- Find conversation threads by UID, Message-ID, or subject\n",
-                "- Archive messages, trash messages, move between mailboxes, mark read/unread, star/unstar\n",
+                "- Archive, trash, or move messages (one at a time, or several per call with archive_messages/trash_messages/move_messages), mark read/unread, star/unstar\n",
                 "- Save drafts (including threaded replies) to the Drafts mailbox\n",
                 "\n",
                 "Cannot: send messages or manage mailboxes. Drafts are saved for the user to send manually.\n",

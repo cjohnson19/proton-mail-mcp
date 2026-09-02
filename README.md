@@ -59,7 +59,10 @@ OAuth callbacks beyond claude.ai/claude.com and loopback.
 | `list_messages_by_thread` | Find related messages by Message-ID or subject |
 | `archive_message` | Move a message to Archive |
 | `trash_message` | Move a message to Trash |
+| `archive_messages` | Move several messages to Archive in one call |
+| `trash_messages` | Move several messages to Trash in one call |
 | `move_message` | Move a message to a different mailbox |
+| `move_messages` | Move several messages to a different mailbox in one call |
 | `mark_as_read` | Mark a message as read or unread |
 | `set_flagged` | Star or unstar a message |
 | `draft_email` | Save a draft to the Drafts mailbox, optionally as a threaded reply |

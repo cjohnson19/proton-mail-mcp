@@ -692,6 +692,169 @@ async fn test_trash_message() {
     assert_eq!(trash_list.messages.len(), 1);
 }
 
+async fn seed_inbox(user: &str, folder: &str, subjects: &[&str]) {
+    let mut raw = imap_session(user).await;
+    create_mailbox(&mut raw, folder).await;
+    for subject in subjects {
+        append_message(
+            &mut raw,
+            "INBOX",
+            &build_rfc2822_message("a@example.com", user, subject, "body", &[]),
+        )
+        .await;
+    }
+    raw.logout().await.ok();
+}
+
+async fn inbox_uids(client: &mut EmailClient) -> Vec<u32> {
+    client
+        .list_messages(ListMessagesRequest {
+            mailbox_name: "INBOX".into(),
+            limit: 10,
+            before_uid: None,
+            include_snippet: false,
+        })
+        .await
+        .unwrap()
+        .messages
+        .iter()
+        .map(|m| m.uid)
+        .collect()
+}
+
+async fn mailbox_count(client: &mut EmailClient, mailbox: &str) -> u32 {
+    client
+        .get_mailbox_status(GetMailboxStatusRequest {
+            mailbox_name: mailbox.into(),
+        })
+        .await
+        .unwrap()
+        .messages
+}
+
+fn batch_request(uids: &[u32]) -> MessageBatchRequest {
+    MessageBatchRequest {
+        source_mailbox: "INBOX".into(),
+        messages: uids
+            .iter()
+            .map(|uid| MessageRef {
+                uid: *uid,
+                subject: None,
+            })
+            .collect(),
+    }
+}
+
+#[tokio::test]
+async fn test_archive_messages_batch() {
+    let user = "archivebatch@localhost";
+    seed_inbox(user, "Archive", &["First", "Second", "Third"]).await;
+
+    let mut client = connect_client(user).await;
+    let uids = inbox_uids(&mut client).await;
+    assert_eq!(uids.len(), 3);
+    let keep = *uids.iter().min().unwrap();
+    let mut to_archive: Vec<u32> = uids.into_iter().filter(|uid| *uid != keep).collect();
+    to_archive.sort_unstable();
+
+    let resp = client
+        .archive_messages(batch_request(&[to_archive[1], to_archive[0], 9999]))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.source_mailbox, "INBOX");
+    assert_eq!(resp.destination_mailbox, "Archive");
+    assert_eq!(resp.moved, to_archive);
+    assert_eq!(resp.not_found, vec![9999]);
+
+    assert_eq!(mailbox_count(&mut client, "INBOX").await, 1);
+    assert_eq!(mailbox_count(&mut client, "Archive").await, 2);
+    assert_eq!(inbox_uids(&mut client).await, vec![keep]);
+}
+
+#[tokio::test]
+async fn test_trash_messages_batch() {
+    let user = "trashbatch@localhost";
+    seed_inbox(user, "Trash", &["One", "Two"]).await;
+
+    let mut client = connect_client(user).await;
+    let mut uids = inbox_uids(&mut client).await;
+    uids.sort_unstable();
+    assert_eq!(uids.len(), 2);
+
+    let resp = client.trash_messages(batch_request(&uids)).await.unwrap();
+
+    assert_eq!(resp.destination_mailbox, "Trash");
+    assert_eq!(resp.moved, uids);
+    assert!(resp.not_found.is_empty());
+    assert_eq!(mailbox_count(&mut client, "INBOX").await, 0);
+    assert_eq!(mailbox_count(&mut client, "Trash").await, 2);
+
+    let again = client.trash_messages(batch_request(&uids)).await.unwrap();
+    assert!(again.moved.is_empty());
+    assert_eq!(again.not_found, uids);
+}
+
+#[tokio::test]
+async fn test_trash_messages_rejects_empty() {
+    let mut client = connect_client("trashbatchempty@localhost").await;
+    let err = client.trash_messages(batch_request(&[])).await.unwrap_err();
+    assert!(err.contains("at least one"), "unexpected error: {err}");
+}
+
+fn move_batch_request(destination: &str, uids: &[u32]) -> MoveMessagesRequest {
+    MoveMessagesRequest {
+        source_mailbox: "INBOX".into(),
+        destination_mailbox: destination.into(),
+        messages: batch_request(uids).messages,
+    }
+}
+
+#[tokio::test]
+async fn test_move_messages_batch() {
+    let user = "movebatch@localhost";
+    seed_inbox(user, "Receipts", &["Invoice 1", "Invoice 2", "Unrelated"]).await;
+
+    let mut client = connect_client(user).await;
+    let mut uids = inbox_uids(&mut client).await;
+    uids.sort_unstable();
+    assert_eq!(uids.len(), 3);
+    let (keep, to_move) = (uids[2], &uids[..2]);
+
+    let resp = client
+        .move_messages(move_batch_request(
+            "Receipts",
+            &[to_move[0], to_move[1], 4242],
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.source_mailbox, "INBOX");
+    assert_eq!(resp.destination_mailbox, "Receipts");
+    assert_eq!(resp.moved, to_move);
+    assert_eq!(resp.not_found, vec![4242]);
+    assert_eq!(mailbox_count(&mut client, "INBOX").await, 1);
+    assert_eq!(mailbox_count(&mut client, "Receipts").await, 2);
+    assert_eq!(inbox_uids(&mut client).await, vec![keep]);
+}
+
+#[tokio::test]
+async fn test_move_messages_to_trash_blocked() {
+    let user = "movebatchblock@localhost";
+    seed_inbox(user, "Trash", &["Blocked"]).await;
+
+    let mut client = connect_client(user).await;
+    let uids = inbox_uids(&mut client).await;
+
+    let err = client
+        .move_messages(move_batch_request("trash", &uids))
+        .await
+        .unwrap_err();
+
+    assert!(err.contains("not allowed"), "unexpected error: {err}");
+    assert_eq!(mailbox_count(&mut client, "INBOX").await, 1);
+}
+
 #[tokio::test]
 async fn test_move_message() {
     let user = "movemsg@localhost";

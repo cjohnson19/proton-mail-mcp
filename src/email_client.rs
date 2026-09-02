@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use async_imap::{
     Session,
@@ -536,6 +536,52 @@ pub struct TrashMessageResponse {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct MessageRef {
+    /// UID of the message
+    #[schemars(range(min = 1))]
+    pub uid: u32,
+    /// Subject of the message (not used for the operation, but shown during tool approval for context)
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub subject: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MessageBatchRequest {
+    /// Name of the mailbox the messages are currently in (e.g. "INBOX")
+    #[schemars(length(min = 1), example = &"INBOX")]
+    pub source_mailbox: String,
+    /// Messages to operate on, identified by UID within `source_mailbox`
+    #[schemars(length(min = 1))]
+    pub messages: Vec<MessageRef>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MoveMessagesRequest {
+    /// Name of the mailbox the messages are currently in (e.g. "INBOX")
+    #[schemars(length(min = 1), example = &"INBOX")]
+    pub source_mailbox: String,
+    /// Destination mailbox to move the messages to (cannot be "Trash" — use trash_messages instead)
+    #[schemars(length(min = 1), example = &"Receipts")]
+    pub destination_mailbox: String,
+    /// Messages to move, identified by UID within `source_mailbox`
+    #[schemars(length(min = 1))]
+    pub messages: Vec<MessageRef>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MessageBatchResponse {
+    /// Original mailbox the messages were in
+    pub source_mailbox: String,
+    /// Mailbox the messages were moved to
+    pub destination_mailbox: String,
+    /// UIDs that were moved, in ascending order
+    pub moved: Vec<u32>,
+    /// Requested UIDs that did not exist in `source_mailbox` (already moved, or never there)
+    pub not_found: Vec<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct MoveMessageRequest {
     /// Name of the mailbox containing the message
     #[schemars(length(min = 1), example = &"INBOX")]
@@ -904,6 +950,13 @@ fn closest_mailbox<'a>(requested: &str, names: &'a [String]) -> Option<&'a Strin
         .filter(|(d, _)| *d <= threshold)
         .min_by_key(|(d, _)| *d)
         .map(|(_, n)| n)
+}
+
+fn uid_sequence_set(uids: impl IntoIterator<Item = u32>) -> String {
+    uids.into_iter()
+        .map(|uid| uid.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn build_search_query(req: &SearchMessagesRequest) -> String {
@@ -1634,6 +1687,82 @@ impl EmailClient {
         })
     }
 
+    #[instrument(skip(self), fields(source = %req.source_mailbox, count = req.messages.len()))]
+    pub async fn archive_messages(
+        &mut self,
+        req: MessageBatchRequest,
+    ) -> Result<MessageBatchResponse, String> {
+        self.move_batch(req.source_mailbox, &req.messages, "Archive")
+            .await
+    }
+
+    #[instrument(skip(self), fields(source = %req.source_mailbox, count = req.messages.len()))]
+    pub async fn trash_messages(
+        &mut self,
+        req: MessageBatchRequest,
+    ) -> Result<MessageBatchResponse, String> {
+        self.move_batch(req.source_mailbox, &req.messages, "Trash")
+            .await
+    }
+
+    #[instrument(skip(self), fields(source = %req.source_mailbox, destination = %req.destination_mailbox, count = req.messages.len()))]
+    pub async fn move_messages(
+        &mut self,
+        req: MoveMessagesRequest,
+    ) -> Result<MessageBatchResponse, String> {
+        if req.destination_mailbox.eq_ignore_ascii_case("trash") {
+            warn!("blocked batch move to Trash");
+            return Err("Moving messages to Trash is not allowed via this tool. Use the trash_messages tool instead.".into());
+        }
+        self.move_batch(req.source_mailbox, &req.messages, &req.destination_mailbox)
+            .await
+    }
+
+    /// Move a set of UIDs in one `UID MOVE`. UIDs that no longer exist in the
+    /// source mailbox are reported back rather than silently ignored.
+    async fn move_batch(
+        &mut self,
+        source_mailbox: String,
+        messages: &[MessageRef],
+        destination: &str,
+    ) -> Result<MessageBatchResponse, String> {
+        let uids: BTreeSet<u32> = messages.iter().map(|m| m.uid).collect();
+        if uids.is_empty() {
+            return Err("messages must contain at least one UID".into());
+        }
+
+        self.ensure_connected().await?;
+        self.select_or_suggest(&source_mailbox).await?;
+
+        let existing = self
+            .session
+            .uid_search(format!("UID {}", uid_sequence_set(uids.iter().copied())))
+            .await
+            .map_err(|e| e.to_string())?;
+        let (moved, not_found): (Vec<u32>, Vec<u32>) =
+            uids.into_iter().partition(|uid| existing.contains(uid));
+
+        if !moved.is_empty() {
+            self.session
+                .uid_mv(uid_sequence_set(moved.iter().copied()), destination)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
+        debug!(
+            moved = moved.len(),
+            not_found = not_found.len(),
+            "batch moved"
+        );
+
+        Ok(MessageBatchResponse {
+            source_mailbox,
+            destination_mailbox: destination.into(),
+            moved,
+            not_found,
+        })
+    }
+
     #[instrument(skip(self), fields(source = %req.source_mailbox, destination = %req.destination_mailbox, uid = req.uid))]
     pub async fn move_message(
         &mut self,
@@ -1984,6 +2113,30 @@ mod tests {
             before_uid["description"],
             "Return messages with UID less than this value (for pagination)"
         );
+    }
+
+    #[test]
+    fn message_batch_request_schema() {
+        let schema = serde_json::to_value(schema_for!(MessageBatchRequest)).unwrap();
+        let mailbox = get_property(&schema, "source_mailbox");
+        assert_eq!(mailbox["minLength"], 1);
+
+        let messages = get_property(&schema, "messages");
+        assert_eq!(
+            messages["minItems"], 1,
+            "messages should require at least one entry"
+        );
+
+        let uid = &schema["$defs"]["MessageRef"]["properties"]["uid"];
+        assert_eq!(uid["minimum"], 1, "uid should have minimum 1");
+    }
+
+    #[test]
+    fn move_messages_request_schema() {
+        let schema = serde_json::to_value(schema_for!(MoveMessagesRequest)).unwrap();
+        assert_eq!(get_property(&schema, "source_mailbox")["minLength"], 1);
+        assert_eq!(get_property(&schema, "destination_mailbox")["minLength"], 1);
+        assert_eq!(get_property(&schema, "messages")["minItems"], 1);
     }
 
     #[test]
