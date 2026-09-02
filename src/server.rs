@@ -13,7 +13,7 @@ use crate::email_client::{
     ArchiveMessageRequest, DraftEmailRequest, EmailClient, GetAttachmentRequest,
     GetMailboxStatusRequest, GetMessageRequest, ListMessagesByThreadRequest, ListMessagesRequest,
     MarkAsReadRequest, MoveMessageRequest, ResolveSpecialMailboxRequest, SearchMessagesRequest,
-    TrashMessageRequest,
+    SetFlaggedRequest, TrashMessageRequest,
 };
 
 #[derive(Clone)]
@@ -102,14 +102,14 @@ impl ProtonMailService {
 
     #[tool(
         title = "Search Messages",
-        description = "Search for messages in a mailbox using IMAP SEARCH. Supports filtering by from, to, subject, body text, date range (DD-Mon-YYYY format), seen/unseen status, and flagged status. Multiple criteria are combined with AND.",
+        description = "Search for messages in a mailbox using IMAP SEARCH. Supports filtering by from, to, subject, body text, date range (DD-Mon-YYYY format), seen/unseen status, and flagged status. Multiple criteria are combined with AND. Supports pagination via before_uid — pass the next_cursor from the previous response with the same filters.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn search_messages(
         &self,
         Parameters(req): Parameters<SearchMessagesRequest>,
     ) -> Result<String, String> {
-        info!(mailbox = %req.mailbox_name, "tool.search_messages");
+        info!(mailbox = %req.mailbox_name, before_uid = ?req.before_uid, "tool.search_messages");
         let mut client = self.client.lock().await;
         let result = client.search_messages(req).await.map_err(|e| {
             error!(error = %e, "tool.search_messages failed");
@@ -246,6 +246,28 @@ impl ProtonMailService {
     }
 
     #[tool(
+        title = "Set Flagged",
+        description = "Star or unstar a message by UID. Defaults to starring the message; set flagged=false to remove the star.",
+        annotations(
+            read_only_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn set_flagged(
+        &self,
+        Parameters(req): Parameters<SetFlaggedRequest>,
+    ) -> Result<String, String> {
+        info!(source = %req.source_mailbox, uid = req.uid, flagged = req.flagged, "tool.set_flagged");
+        let mut client = self.client.lock().await;
+        let result = client.set_flagged(req).await.map_err(|e| {
+            error!(error = %e, "tool.set_flagged failed");
+            e
+        })?;
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
         title = "Draft Email",
         description = "Compose an email and save it to the Drafts mailbox. Supports To/Cc/Bcc, subject, and a plain-text body. Pass in_reply_to (source mailbox + UID) to thread as a reply — the original Message-ID and References are fetched and set on the draft. The draft is NOT sent; the user must review and send it from their mail client.",
         annotations(
@@ -274,14 +296,14 @@ impl ProtonMailService {
 
     #[tool(
         title = "List Messages by Thread",
-        description = "Find related messages in a thread by Message-ID or subject. Searches In-Reply-To, References, and Message-ID headers to reconstruct conversation threads. At least one of message_id or subject must be provided. Note: search is limited to a single mailbox.",
+        description = "Find related messages in a thread by UID, Message-ID, or subject. When given a UID, resolves the message's Message-ID, References, and In-Reply-To headers automatically. Searches thread headers to reconstruct the conversation. At least one of uid, message_id, or subject must be provided. Note: search is limited to a single mailbox.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn list_messages_by_thread(
         &self,
         Parameters(req): Parameters<ListMessagesByThreadRequest>,
     ) -> Result<String, String> {
-        info!(mailbox = %req.mailbox_name, has_message_id = req.message_id.is_some(), has_subject = req.subject.is_some(), "tool.list_messages_by_thread");
+        info!(mailbox = %req.mailbox_name, uid = ?req.uid, has_message_id = req.message_id.is_some(), has_subject = req.subject.is_some(), "tool.list_messages_by_thread");
         let mut client = self.client.lock().await;
         let result = client.list_messages_by_thread(req).await.map_err(|e| {
             error!(error = %e, "tool.list_messages_by_thread failed");
@@ -303,14 +325,14 @@ impl ServerHandler for ProtonMailService {
                 "- Browse mailboxes and list/search messages with pagination\n",
                 "- Read full message content (text auto-extracted from HTML)\n",
                 "- Download attachments (base64-encoded)\n",
-                "- Find conversation threads by Message-ID or subject\n",
-                "- Archive messages, trash messages, move between mailboxes, mark read/unread\n",
+                "- Find conversation threads by UID, Message-ID, or subject\n",
+                "- Archive messages, trash messages, move between mailboxes, mark read/unread, star/unstar\n",
                 "- Save drafts (including threaded replies) to the Drafts mailbox\n",
                 "\n",
                 "Cannot: send messages or manage mailboxes. Drafts are saved for the user to send manually.\n",
                 "\n",
                 "Key conventions:\n",
-                "- Messages are identified by UID + a mailbox name (e.g. \"INBOX\"). Read-only tools call the parameter `mailbox_name`; mutating tools (archive/trash/move/mark_as_read) call it `source_mailbox`.\n",
+                "- Messages are identified by UID + a mailbox name (e.g. \"INBOX\"). Read-only tools call the parameter `mailbox_name`; mutating tools (archive/trash/move/mark_as_read/set_flagged) call it `source_mailbox`.\n",
                 "- Mailbox names are case-sensitive and server-defined. If you don't already know the exact name, call list_mailboxes first — use the `special_use` field on each entry (\"inbox\", \"archive\", \"sent\", \"drafts\", \"trash\", \"junk\", \"all\") to find canonical folders instead of string-matching on names.\n",
                 "- UIDs are stable only within a mailbox + uid_validity pair. Don't reuse a UID across mailboxes.\n",
                 "- Use list_messages or search_messages to find UIDs, then get_message for full content. Prefer search_messages with specific filters over list_messages + scanning when you know what you're looking for.\n",

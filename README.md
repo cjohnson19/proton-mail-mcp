@@ -53,7 +53,7 @@ OAuth callbacks beyond claude.ai/claude.com and loopback.
 | `list_mailboxes` | List all mailboxes |
 | `list_messages` | List messages in a mailbox with pagination |
 | `get_message` | Fetch a full message (headers, body, attachments) |
-| `search_messages` | Search with filters (from, to, subject, body, date range, seen/flagged) |
+| `search_messages` | Search with filters and cursor-based pagination |
 | `get_mailbox_status` | Mailbox stats (count, recent, unseen) |
 | `get_attachment` | Download an attachment (base64-encoded) |
 | `list_messages_by_thread` | Find related messages by Message-ID or subject |
@@ -61,6 +61,7 @@ OAuth callbacks beyond claude.ai/claude.com and loopback.
 | `trash_message` | Move a message to Trash |
 | `move_message` | Move a message to a different mailbox |
 | `mark_as_read` | Mark a message as read or unread |
+| `set_flagged` | Star or unstar a message |
 | `draft_email` | Save a draft to the Drafts mailbox, optionally as a threaded reply |
 
 ## Testing

@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use async_imap::Session;
 use proton_mail_mcp::email_client::EmailClient;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 use tokio_native_tls::TlsStream;
 
 fn test_host() -> String {
@@ -12,6 +15,51 @@ fn test_imaps_port() -> u16 {
         .unwrap_or_else(|_| "3993".into())
         .parse()
         .unwrap_or(3993)
+}
+
+/// TCP proxy in front of the IMAP server whose established connections can be
+/// severed mid-test to simulate the server dropping the connection.
+pub struct TcpProxy {
+    pub port: u16,
+    conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl TcpProxy {
+    pub async fn start_to_imaps() -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("proxy bind failed");
+        let port = listener.local_addr().expect("proxy local_addr").port();
+        let conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
+
+        let accept_conns = conns.clone();
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                let target = (test_host(), test_imaps_port());
+                let handle = tokio::spawn(async move {
+                    let Ok(mut outbound) = TcpStream::connect(target).await else {
+                        return;
+                    };
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                });
+                accept_conns.lock().await.push(handle);
+            }
+        });
+
+        Self { port, conns }
+    }
+
+    /// Kill all established connections; new connections are still accepted.
+    /// Returns how many connections were severed.
+    pub async fn sever(&self) -> usize {
+        let handles: Vec<_> = self.conns.lock().await.drain(..).collect();
+        let count = handles.len();
+        for handle in handles {
+            handle.abort();
+            let _ = handle.await;
+        }
+        count
+    }
 }
 
 pub async fn connect_client(user: &str) -> EmailClient {

@@ -265,6 +265,7 @@ async fn test_search_by_subject() {
             before: None,
             seen: None,
             flagged: None,
+            before_uid: None,
             limit: None,
             include_snippet: false,
         })
@@ -315,6 +316,7 @@ async fn test_search_by_from() {
             before: None,
             seen: None,
             flagged: None,
+            before_uid: None,
             limit: None,
             include_snippet: false,
         })
@@ -327,6 +329,75 @@ async fn test_search_by_from() {
             .from
             .iter()
             .any(|f| f.contains("specific-sender"))
+    );
+}
+
+#[tokio::test]
+async fn test_search_messages_pagination_preserves_filters() {
+    let user = "searchpagination@localhost";
+
+    let mut raw = imap_session(user).await;
+    for i in 1..=4 {
+        append_message(
+            &mut raw,
+            "INBOX",
+            &build_rfc2822_message(
+                "sender@example.com",
+                user,
+                &format!("Matching topic {i}"),
+                "body",
+                &[],
+            ),
+        )
+        .await;
+    }
+    append_message(
+        &mut raw,
+        "INBOX",
+        &build_rfc2822_message("sender@example.com", user, "Unrelated", "body", &[]),
+    )
+    .await;
+    raw.logout().await.ok();
+
+    let request = |before_uid| SearchMessagesRequest {
+        mailbox_name: "INBOX".into(),
+        from: None,
+        to: None,
+        subject: Some("Matching topic".into()),
+        body: None,
+        since: None,
+        before: None,
+        seen: None,
+        flagged: None,
+        before_uid,
+        limit: Some(2),
+        include_snippet: false,
+    };
+    let mut client = connect_client(user).await;
+
+    let page1 = client.search_messages(request(None)).await.unwrap();
+    let page2 = client
+        .search_messages(request(page1.next_cursor))
+        .await
+        .unwrap();
+
+    assert_eq!(page1.total_matches, 4);
+    assert_eq!(page2.total_matches, 4);
+    assert_eq!(page1.messages.len(), 2);
+    assert_eq!(page2.messages.len(), 2);
+    assert!(page1.next_cursor.is_some());
+    assert_eq!(page2.next_cursor, None);
+    assert!(page1.messages.iter().chain(&page2.messages).all(|message| {
+        message
+            .subject
+            .as_deref()
+            .is_some_and(|subject| subject.contains("Matching topic"))
+    }));
+    assert!(
+        page1
+            .messages
+            .iter()
+            .all(|first| { page2.messages.iter().all(|second| first.uid != second.uid) })
     );
 }
 
@@ -458,6 +529,7 @@ async fn test_list_messages_by_thread() {
     let resp = client
         .list_messages_by_thread(ListMessagesByThreadRequest {
             mailbox_name: "INBOX".into(),
+            uid: None,
             message_id: Some(msg_id.into()),
             subject: None,
         })
@@ -474,6 +546,34 @@ async fn test_list_messages_by_thread() {
         resp.messages
             .iter()
             .any(|m| m.in_reply_to.as_deref() == Some(msg_id))
+    );
+
+    let reply_uid = resp
+        .messages
+        .iter()
+        .find(|message| message.in_reply_to.as_deref() == Some(msg_id))
+        .unwrap()
+        .uid;
+    let by_uid = client
+        .list_messages_by_thread(ListMessagesByThreadRequest {
+            mailbox_name: "INBOX".into(),
+            uid: Some(reply_uid),
+            message_id: None,
+            subject: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(by_uid.total_in_thread, 2);
+    assert_eq!(
+        by_uid
+            .messages
+            .iter()
+            .map(|message| message.uid)
+            .collect::<Vec<_>>(),
+        resp.messages
+            .iter()
+            .map(|message| message.uid)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -794,6 +894,74 @@ async fn test_mark_as_unread() {
     assert_eq!(status.unseen, Some(1));
 }
 
+#[tokio::test]
+async fn test_set_flagged_and_unflagged() {
+    let user = "setflagged@localhost";
+
+    let mut raw = imap_session(user).await;
+    append_message(
+        &mut raw,
+        "INBOX",
+        &build_rfc2822_message("a@example.com", user, "Flag test", "body", &[]),
+    )
+    .await;
+    raw.logout().await.ok();
+
+    let mut client = connect_client(user).await;
+    let list = client
+        .list_messages(ListMessagesRequest {
+            mailbox_name: "INBOX".into(),
+            limit: 1,
+            before_uid: None,
+            include_snippet: false,
+        })
+        .await
+        .unwrap();
+    let uid = list.messages[0].uid;
+
+    let flagged = client
+        .set_flagged(SetFlaggedRequest {
+            source_mailbox: "INBOX".into(),
+            uid,
+            flagged: true,
+        })
+        .await
+        .unwrap();
+    assert!(flagged.flagged);
+
+    let list = client
+        .list_messages(ListMessagesRequest {
+            mailbox_name: "INBOX".into(),
+            limit: 1,
+            before_uid: None,
+            include_snippet: false,
+        })
+        .await
+        .unwrap();
+    assert!(list.messages[0].flags.contains(&MessageFlag::Flagged));
+
+    let unflagged = client
+        .set_flagged(SetFlaggedRequest {
+            source_mailbox: "INBOX".into(),
+            uid,
+            flagged: false,
+        })
+        .await
+        .unwrap();
+    assert!(!unflagged.flagged);
+
+    let list = client
+        .list_messages(ListMessagesRequest {
+            mailbox_name: "INBOX".into(),
+            limit: 1,
+            before_uid: None,
+            include_snippet: false,
+        })
+        .await
+        .unwrap();
+    assert!(!list.messages[0].flags.contains(&MessageFlag::Flagged));
+}
+
 fn basic_draft_request(to: &str, subject: &str, body: &str) -> DraftEmailRequest {
     DraftEmailRequest {
         from: None,
@@ -930,6 +1098,7 @@ async fn test_draft_email_reply_threading() {
     let thread = client
         .list_messages_by_thread(ListMessagesByThreadRequest {
             mailbox_name: "Drafts".into(),
+            uid: None,
             message_id: Some(original_msg_id.into()),
             subject: None,
         })
@@ -1010,4 +1179,50 @@ async fn test_draft_email_from_override() {
         "From should NOT contain the default login user, got: {:?}",
         full.from
     );
+}
+
+#[tokio::test]
+async fn test_reconnects_after_connection_loss() {
+    let user = "reconnect@localhost";
+
+    let mut raw = imap_session(user).await;
+    append_message(
+        &mut raw,
+        "INBOX",
+        &build_rfc2822_message("sender@example.com", user, "Survivor", "still here", &[]),
+    )
+    .await;
+    raw.logout().await.ok();
+
+    let proxy = helpers::TcpProxy::start_to_imaps().await;
+    let mut client = EmailClient::new_direct_tls("127.0.0.1", proxy.port, user, user)
+        .await
+        .expect("initial connect through proxy failed");
+
+    let live = client
+        .get_mailbox_status(GetMailboxStatusRequest {
+            mailbox_name: "INBOX".into(),
+        })
+        .await
+        .expect("status should succeed on a live connection");
+    assert_eq!(live.messages, 1);
+
+    let severed = proxy.sever().await;
+    assert!(
+        severed >= 1,
+        "proxy should have severed the live connection"
+    );
+
+    // A dead session must not surface as a successful-but-empty response
+    // (async-imap treats EOF as an empty result) — it must reconnect and
+    // return real data.
+    let resp = client
+        .get_mailbox_status(GetMailboxStatusRequest {
+            mailbox_name: "INBOX".into(),
+        })
+        .await
+        .expect("client should transparently reconnect after the connection dropped");
+    assert_eq!(resp.mailbox_name, "INBOX");
+    assert_eq!(resp.messages, 1, "reconnected session should see real data");
+    assert!(resp.uid_validity.is_some());
 }

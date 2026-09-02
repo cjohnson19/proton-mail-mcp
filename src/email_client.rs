@@ -17,11 +17,23 @@ use tracing::{debug, instrument, warn};
 const FETCH_HEADERS: &str = "(UID FLAGS BODY.PEEK[HEADER])";
 const FETCH_HEADERS_AND_BODY: &str = "(UID FLAGS BODY.PEEK[])";
 const FETCH_THREAD_HEADERS: &str = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])";
+const FETCH_THREAD_SEED_HEADERS: &str =
+    "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO SUBJECT)])";
 
 #[derive(Debug)]
 pub struct EmailClient {
     session: Session<TlsStream<TcpStream>>,
     default_from: String,
+    params: ConnectParams,
+}
+
+#[derive(Debug, Clone)]
+struct ConnectParams {
+    domain: String,
+    port: u16,
+    username: String,
+    password: String,
+    direct_tls: bool,
 }
 
 #[allow(dead_code)]
@@ -359,6 +371,9 @@ pub struct SearchMessagesRequest {
     pub seen: Option<bool>,
     /// Filter by flagged status
     pub flagged: Option<bool>,
+    /// Return matching messages with UID less than this value (for pagination)
+    #[schemars(range(min = 1))]
+    pub before_uid: Option<u32>,
     /// Maximum number of results (default 25, max 100)
     #[schemars(range(min = 1, max = 100))]
     pub limit: Option<u32>,
@@ -375,7 +390,8 @@ pub struct SearchMessagesResponse {
     /// Total number of messages matching the search criteria
     pub total_matches: u32,
     /// Cursor for the next page: pass this as `before_uid` on the next
-    /// list_messages call. `None` means there are no more results.
+    /// search_messages call with the same filters. `None` means there are no
+    /// more results.
     pub next_cursor: Option<u32>,
 }
 
@@ -435,9 +451,13 @@ pub struct ListMessagesByThreadRequest {
     /// Name of the mailbox to search
     #[schemars(length(min = 1), example = &"INBOX")]
     pub mailbox_name: String,
-    /// Message-ID header value to find the thread for (at least one of message_id or subject is required)
+    /// UID of a message whose headers should be used to identify the thread
+    /// (at least one of uid, message_id, or subject is required)
+    #[schemars(range(min = 1))]
+    pub uid: Option<u32>,
+    /// Message-ID header value to find the thread for (at least one of uid, message_id, or subject is required)
     pub message_id: Option<String>,
-    /// Subject to search for (at least one of message_id or subject is required)
+    /// Subject to search for (at least one of uid, message_id, or subject is required)
     pub subject: Option<String>,
 }
 
@@ -567,6 +587,29 @@ pub struct MarkAsReadResponse {
     pub source_mailbox: String,
     /// Whether the message is now marked as read
     pub read: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetFlaggedRequest {
+    /// Name of the mailbox the message is currently in (e.g. "INBOX")
+    #[schemars(length(min = 1), example = &"INBOX")]
+    pub source_mailbox: String,
+    /// UID of the message to update
+    #[schemars(range(min = 1))]
+    pub uid: u32,
+    /// Flagged status of the message. Set to false to remove the flag instead
+    #[serde(default = "default_true")]
+    pub flagged: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SetFlaggedResponse {
+    /// UID of the message
+    pub uid: u32,
+    /// Mailbox the message is in
+    pub source_mailbox: String,
+    /// Whether the message is now flagged
+    pub flagged: bool,
 }
 
 fn default_drafts_mailbox() -> String {
@@ -955,6 +998,86 @@ fn build_draft_rfc5322(
     Ok((raw, message_id_full))
 }
 
+impl ConnectParams {
+    async fn connect(&self) -> Result<Session<TlsStream<TcpStream>>, String> {
+        let tls_stream = if self.direct_tls {
+            debug!(domain = %self.domain, port = self.port, "connecting to IMAPS server (direct TLS)");
+
+            let tcp_stream = TcpStream::connect((&*self.domain, self.port))
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "TCP connection failed");
+                    e.to_string()
+                })?;
+
+            let tls_connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_certs(true)
+                .build()
+                .map_err(|e| e.to_string())?;
+            let tls_connector = tokio_native_tls::TlsConnector::from(tls_connector);
+            tls_connector
+                .connect(&self.domain, tcp_stream)
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "TLS connection failed");
+                    e.to_string()
+                })?
+        } else {
+            debug!(domain = %self.domain, port = self.port, "connecting to IMAP server");
+
+            let tcp_stream = TcpStream::connect((&*self.domain, self.port))
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "TCP connection failed");
+                    e.to_string()
+                })?;
+
+            let mut client = async_imap::Client::new(tcp_stream);
+            client
+                .read_response()
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("no server greeting")?;
+            client
+                .run_command_and_check_ok("STARTTLS", None)
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "STARTTLS command failed");
+                    e.to_string()
+                })?;
+
+            let tcp_stream = client.into_inner();
+
+            // Bridge's self-signed cert names localhost, but we may reach it via a
+            // Docker network alias — skip hostname verification as well.
+            let tls_connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true)
+                .build()
+                .map_err(|e| e.to_string())?;
+            let tls_connector = tokio_native_tls::TlsConnector::from(tls_connector);
+            tls_connector
+                .connect(&self.domain, tcp_stream)
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "TLS upgrade failed");
+                    e.to_string()
+                })?
+        };
+
+        let client = async_imap::Client::new(tls_stream);
+        let session = client
+            .login(&self.username, &self.password)
+            .await
+            .map_err(|e| {
+                warn!(error = %e.0, "IMAP login failed");
+                e.0.to_string()
+            })?;
+        debug!("IMAP session established");
+        Ok(session)
+    }
+}
+
 impl EmailClient {
     pub async fn new(
         domain: &str,
@@ -962,52 +1085,14 @@ impl EmailClient {
         username: &str,
         password: &str,
     ) -> Result<Self, String> {
-        debug!(domain, port, "connecting to IMAP server");
-
-        let tcp_stream = TcpStream::connect((domain, port)).await.map_err(|e| {
-            warn!(error = %e, "TCP connection failed");
-            e.to_string()
-        })?;
-
-        let mut client = async_imap::Client::new(tcp_stream);
-        client
-            .read_response()
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or("no server greeting")?;
-        client
-            .run_command_and_check_ok("STARTTLS", None)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "STARTTLS command failed");
-                e.to_string()
-            })?;
-
-        let tcp_stream = client.into_inner();
-
-        let tls_connector = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map_err(|e| e.to_string())?;
-        let tls_connector = tokio_native_tls::TlsConnector::from(tls_connector);
-        let tls_stream: TlsStream<TcpStream> = tls_connector
-            .connect(domain, tcp_stream)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "TLS upgrade failed");
-                e.to_string()
-            })?;
-
-        let client = async_imap::Client::new(tls_stream);
-        let imap_session = client.login(username, password).await.map_err(|e| {
-            warn!(error = %e.0, "IMAP login failed");
-            e.0.to_string()
-        })?;
-        debug!("IMAP session established");
-        Ok(Self {
-            session: imap_session,
-            default_from: username.to_owned(),
+        Self::connect_with(ConnectParams {
+            domain: domain.to_owned(),
+            port,
+            username: username.to_owned(),
+            password: password.to_owned(),
+            direct_tls: false,
         })
+        .await
     }
 
     /// Connect via IMAPS (direct TLS, no STARTTLS). Used for servers that
@@ -1018,40 +1103,46 @@ impl EmailClient {
         username: &str,
         password: &str,
     ) -> Result<Self, String> {
-        debug!(domain, port, "connecting to IMAPS server (direct TLS)");
-
-        let tcp_stream = TcpStream::connect((domain, port)).await.map_err(|e| {
-            warn!(error = %e, "TCP connection failed");
-            e.to_string()
-        })?;
-
-        let tls_connector = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map_err(|e| e.to_string())?;
-        let tls_connector = tokio_native_tls::TlsConnector::from(tls_connector);
-        let tls_stream: TlsStream<TcpStream> = tls_connector
-            .connect(domain, tcp_stream)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "TLS connection failed");
-                e.to_string()
-            })?;
-
-        let client = async_imap::Client::new(tls_stream);
-        let imap_session = client.login(username, password).await.map_err(|e| {
-            warn!(error = %e.0, "IMAP login failed");
-            e.0.to_string()
-        })?;
-        debug!("IMAPS session established");
-        Ok(Self {
-            session: imap_session,
-            default_from: username.to_owned(),
+        Self::connect_with(ConnectParams {
+            domain: domain.to_owned(),
+            port,
+            username: username.to_owned(),
+            password: password.to_owned(),
+            direct_tls: true,
         })
+        .await
+    }
+
+    async fn connect_with(params: ConnectParams) -> Result<Self, String> {
+        let session = params.connect().await?;
+        Ok(Self {
+            session,
+            default_from: params.username.clone(),
+            params,
+        })
+    }
+
+    /// Probe the connection with a NOOP and transparently reconnect if it has
+    /// died (Bridge restart, idle timeout). The probe must go through
+    /// `run_command_and_check_ok`, which fails with `ConnectionLost` on EOF —
+    /// async-imap's higher-level commands (including `noop()`) treat a closed
+    /// stream as a successful empty response, so a dead session would
+    /// otherwise keep returning default/empty data instead of erroring.
+    async fn ensure_connected(&mut self) -> Result<(), String> {
+        if let Err(e) = self.session.run_command_and_check_ok("NOOP").await {
+            warn!(error = %e, "IMAP connection lost; reconnecting");
+            self.session = self
+                .params
+                .connect()
+                .await
+                .map_err(|e| format!("IMAP reconnect failed: {e}"))?;
+        }
+        Ok(())
     }
 
     #[instrument(skip(self))]
     pub async fn list_mailboxes(&mut self) -> Result<ListMailboxesResponse, String> {
+        self.ensure_connected().await?;
         let names: Vec<Name> = self
             .session
             .list(None, Some("*"))
@@ -1178,6 +1269,7 @@ impl EmailClient {
         &mut self,
         req: ListMessagesRequest,
     ) -> Result<ListMessagesResponse, String> {
+        self.ensure_connected().await?;
         let limit = req.limit.min(100);
         let fetch_spec = if req.include_snippet {
             FETCH_HEADERS_AND_BODY
@@ -1271,6 +1363,7 @@ impl EmailClient {
         &mut self,
         req: GetMessageRequest,
     ) -> Result<GetMessageResponse, String> {
+        self.ensure_connected().await?;
         let mailbox = self.examine_or_suggest(&req.mailbox_name).await?;
 
         let fetches: Vec<Fetch> = self
@@ -1350,11 +1443,12 @@ impl EmailClient {
         })
     }
 
-    #[instrument(skip(self), fields(mailbox = %req.mailbox_name))]
+    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, before_uid = ?req.before_uid))]
     pub async fn search_messages(
         &mut self,
         req: SearchMessagesRequest,
     ) -> Result<SearchMessagesResponse, String> {
+        self.ensure_connected().await?;
         let limit = req.limit.unwrap_or(25).min(100);
         let fetch_spec = if req.include_snippet {
             FETCH_HEADERS_AND_BODY
@@ -1381,9 +1475,21 @@ impl EmailClient {
             });
         }
 
-        let mut uid_vec: Vec<u32> = uids.into_iter().collect();
+        let mut uid_vec: Vec<u32> = uids
+            .into_iter()
+            .filter(|uid| req.before_uid.is_none_or(|before_uid| *uid < before_uid))
+            .collect();
         uid_vec.sort_unstable_by(|a, b| b.cmp(a));
+        let has_more = uid_vec.len() > limit as usize;
         uid_vec.truncate(limit as usize);
+
+        if uid_vec.is_empty() {
+            return Ok(SearchMessagesResponse {
+                messages: Vec::new(),
+                total_matches,
+                next_cursor: None,
+            });
+        }
 
         let uid_set = uid_vec
             .iter()
@@ -1403,12 +1509,11 @@ impl EmailClient {
         let mut messages = extract_summaries(&fetches, req.include_snippet);
         messages.sort_by_key(|a| std::cmp::Reverse(a.uid));
 
-        let next_cursor =
-            if messages.len() == limit as usize && total_matches > messages.len() as u32 {
-                messages.iter().map(|m| m.uid).min()
-            } else {
-                None
-            };
+        let next_cursor = if has_more {
+            messages.iter().map(|m| m.uid).min()
+        } else {
+            None
+        };
 
         Ok(SearchMessagesResponse {
             messages,
@@ -1422,6 +1527,7 @@ impl EmailClient {
         &mut self,
         req: GetMailboxStatusRequest,
     ) -> Result<GetMailboxStatusResponse, String> {
+        self.ensure_connected().await?;
         let mailbox = self.examine_or_suggest(&req.mailbox_name).await?;
 
         let unseen = self
@@ -1452,6 +1558,7 @@ impl EmailClient {
         &mut self,
         req: GetAttachmentRequest,
     ) -> Result<GetAttachmentResponse, String> {
+        self.ensure_connected().await?;
         let mailbox = self.examine_or_suggest(&req.mailbox_name).await?;
 
         let fetches: Vec<Fetch> = self
@@ -1489,6 +1596,7 @@ impl EmailClient {
         &mut self,
         req: ArchiveMessageRequest,
     ) -> Result<ArchiveMessageResponse, String> {
+        self.ensure_connected().await?;
         self.select_or_suggest(&req.source_mailbox).await?;
 
         self.session
@@ -1510,6 +1618,7 @@ impl EmailClient {
         &mut self,
         req: TrashMessageRequest,
     ) -> Result<TrashMessageResponse, String> {
+        self.ensure_connected().await?;
         self.select_or_suggest(&req.source_mailbox).await?;
 
         self.session
@@ -1530,6 +1639,7 @@ impl EmailClient {
         &mut self,
         req: MoveMessageRequest,
     ) -> Result<MoveMessageResponse, String> {
+        self.ensure_connected().await?;
         if req.destination_mailbox.eq_ignore_ascii_case("trash") {
             warn!("blocked move to Trash");
             return Err("Moving messages to Trash is not allowed via this tool. Use the trash_message tool instead.".into());
@@ -1556,6 +1666,7 @@ impl EmailClient {
         &mut self,
         req: MarkAsReadRequest,
     ) -> Result<MarkAsReadResponse, String> {
+        self.ensure_connected().await?;
         self.select_or_suggest(&req.source_mailbox).await?;
 
         let flag_op = if req.read { "+FLAGS" } else { "-FLAGS" };
@@ -1579,11 +1690,38 @@ impl EmailClient {
         })
     }
 
+    #[instrument(skip(self), fields(source = %req.source_mailbox, uid = req.uid, flagged = req.flagged))]
+    pub async fn set_flagged(
+        &mut self,
+        req: SetFlaggedRequest,
+    ) -> Result<SetFlaggedResponse, String> {
+        self.ensure_connected().await?;
+        self.select_or_suggest(&req.source_mailbox).await?;
+
+        let flag_op = if req.flagged { "+FLAGS" } else { "-FLAGS" };
+        self.session
+            .uid_store(req.uid.to_string(), format!("{flag_op} (\\Flagged)"))
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        debug!(flagged = req.flagged, "message flagged status updated");
+
+        Ok(SetFlaggedResponse {
+            uid: req.uid,
+            source_mailbox: req.source_mailbox,
+            flagged: req.flagged,
+        })
+    }
+
     #[instrument(skip(self, req), fields(drafts_mailbox = %req.drafts_mailbox, threaded = req.in_reply_to.is_some()))]
     pub async fn draft_email(
         &mut self,
         req: DraftEmailRequest,
     ) -> Result<DraftEmailResponse, String> {
+        self.ensure_connected().await?;
         let from = req
             .from
             .clone()
@@ -1669,21 +1807,60 @@ impl EmailClient {
         }))
     }
 
-    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, has_message_id = req.message_id.is_some(), has_subject = req.subject.is_some()))]
+    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = ?req.uid, has_message_id = req.message_id.is_some(), has_subject = req.subject.is_some()))]
     pub async fn list_messages_by_thread(
         &mut self,
         req: ListMessagesByThreadRequest,
     ) -> Result<ListMessagesByThreadResponse, String> {
-        if req.message_id.is_none() && req.subject.is_none() {
-            warn!("neither message_id nor subject provided");
-            return Err("At least one of message_id or subject must be provided".into());
+        self.ensure_connected().await?;
+        if req.uid.is_none() && req.message_id.is_none() && req.subject.is_none() {
+            warn!("no thread identifier provided");
+            return Err("At least one of uid, message_id, or subject must be provided".into());
         }
 
-        self.examine_or_suggest(&req.mailbox_name).await?;
+        let mailbox = self.examine_or_suggest(&req.mailbox_name).await?;
 
         let mut all_uids = HashSet::new();
+        let mut message_ids = req.message_id.iter().cloned().collect::<HashSet<_>>();
+        let mut subject = req.subject.clone();
 
-        if let Some(ref mid) = req.message_id {
+        if let Some(uid) = req.uid {
+            let fetches: Vec<Fetch> = self
+                .session
+                .uid_fetch(uid.to_string(), FETCH_THREAD_SEED_HEADERS)
+                .await
+                .map_err(|e| e.to_string())?
+                .try_collect()
+                .await
+                .map_err(|e| e.to_string())?;
+            let fetch = fetches
+                .first()
+                .ok_or_else(|| format_uid_not_found(&req.mailbox_name, uid, mailbox.uid_next))?;
+            let header_bytes = fetch.header().ok_or("Message has no headers")?;
+            let (headers, _) = mailparse::parse_headers(header_bytes).map_err(|e| e.to_string())?;
+
+            headers
+                .get_first_value("Message-ID")
+                .and_then(|raw| strip_message_id_brackets(&raw).map(str::to_owned))
+                .into_iter()
+                .for_each(|message_id| {
+                    message_ids.insert(message_id);
+                });
+            ["References", "In-Reply-To"]
+                .iter()
+                .filter_map(|name| headers.get_first_value(name))
+                .flat_map(|raw| parse_references(&raw))
+                .for_each(|message_id| {
+                    message_ids.insert(message_id);
+                });
+
+            if message_ids.is_empty() && subject.is_none() {
+                subject = headers.get_first_value("Subject");
+            }
+            all_uids.insert(uid);
+        }
+
+        for mid in &message_ids {
             let escaped = escape_search_string(mid);
             let searches = [
                 format!("HEADER Message-ID \"{escaped}\""),
@@ -1697,7 +1874,7 @@ impl EmailClient {
             }
         }
 
-        if let Some(ref subj) = req.subject {
+        if let Some(ref subj) = subject {
             let query = format!("SUBJECT \"{}\"", escape_search_string(subj));
             if let Ok(uids) = self.session.uid_search(&query).await {
                 all_uids.extend(uids);
@@ -1852,6 +2029,13 @@ mod tests {
         let limit = get_property(&schema, "limit");
         assert_eq!(limit["minimum"], 1, "limit minimum should be 1");
         assert_eq!(limit["maximum"], 100, "limit maximum should be 100");
+
+        let before_uid = get_property(&schema, "before_uid");
+        assert_eq!(before_uid["minimum"], 1, "before_uid should have minimum 1");
+        assert_eq!(
+            before_uid["description"],
+            "Return matching messages with UID less than this value (for pagination)"
+        );
     }
 
     #[test]
@@ -1882,6 +2066,9 @@ mod tests {
         let schema = serde_json::to_value(schema_for!(ListMessagesByThreadRequest)).unwrap();
         let mailbox = get_property(&schema, "mailbox_name");
         assert_eq!(mailbox["minLength"], 1);
+
+        let uid = get_property(&schema, "uid");
+        assert_eq!(uid["minimum"], 1);
 
         let mid = get_property(&schema, "message_id");
         assert!(
@@ -1967,6 +2154,29 @@ mod tests {
     }
 
     #[test]
+    fn set_flagged_request_schema() {
+        let schema = serde_json::to_value(schema_for!(SetFlaggedRequest)).unwrap();
+        let mailbox = get_property(&schema, "source_mailbox");
+        assert_eq!(mailbox["minLength"], 1);
+
+        let uid = get_property(&schema, "uid");
+        assert_eq!(uid["minimum"], 1);
+
+        let flagged = get_property(&schema, "flagged");
+        assert!(
+            flagged["description"].as_str().unwrap().contains("remove"),
+            "flagged description should explain how to remove the flag"
+        );
+    }
+
+    #[test]
+    fn set_flagged_request_defaults_to_true() {
+        let req: SetFlaggedRequest =
+            serde_json::from_str(r#"{"source_mailbox": "INBOX", "uid": 1}"#).unwrap();
+        assert!(req.flagged, "flagged should default to true");
+    }
+
+    #[test]
     fn response_structs_have_field_descriptions() {
         let check_descriptions = |schema: Value, struct_name: &str, fields: &[&str]| {
             fields.iter().for_each(|field| {
@@ -2049,6 +2259,11 @@ mod tests {
             serde_json::to_value(schema_for!(MarkAsReadResponse)).unwrap(),
             "MarkAsReadResponse",
             &["uid", "source_mailbox", "read"],
+        );
+        check_descriptions(
+            serde_json::to_value(schema_for!(SetFlaggedResponse)).unwrap(),
+            "SetFlaggedResponse",
+            &["uid", "source_mailbox", "flagged"],
         );
     }
 
