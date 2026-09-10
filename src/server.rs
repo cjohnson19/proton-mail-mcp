@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rmcp::{
-    ServerHandler,
+    Json, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
@@ -10,10 +10,15 @@ use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use crate::email_client::{
-    ArchiveMessageRequest, DraftEmailRequest, EmailClient, GetAttachmentRequest,
-    GetMailboxStatusRequest, GetMessageRequest, ListMessagesByThreadRequest, ListMessagesRequest,
-    MarkAsReadRequest, MessageBatchRequest, MoveMessageRequest, MoveMessagesRequest,
-    ResolveSpecialMailboxRequest, SearchMessagesRequest, SetFlaggedRequest, TrashMessageRequest,
+    ArchiveMessageRequest, ArchiveMessageResponse, DraftEmailRequest, DraftEmailResponse,
+    EmailClient, GetAttachmentRequest, GetAttachmentResponse, GetMailboxStatusRequest,
+    GetMailboxStatusResponse, GetMessageRequest, GetMessageResponse, ListMailboxesResponse,
+    ListMessagesByThreadRequest, ListMessagesByThreadResponse, ListMessagesRequest,
+    ListMessagesResponse, MarkAsReadRequest, MarkAsReadResponse, MessageBatchRequest,
+    MessageBatchResponse, MoveMessageRequest, MoveMessageResponse, MoveMessagesRequest,
+    ResolveSpecialMailboxRequest, ResolveSpecialMailboxResponse, SearchMessagesRequest,
+    SearchMessagesResponse, SetFlaggedRequest, SetFlaggedResponse, TrashMessageRequest,
+    TrashMessageResponse,
 };
 
 #[derive(Clone)]
@@ -36,14 +41,14 @@ impl ProtonMailService {
         description = "List all mailboxes in the Proton Mail account. Each entry includes a `special_use` tag (\"inbox\", \"archive\", \"sent\", \"drafts\", \"trash\", \"junk\", \"all\", \"flagged\", \"important\") when the server marks the folder with an IMAP SPECIAL-USE attribute — use that instead of pattern-matching mailbox names.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
-    async fn list_mailboxes(&self) -> Result<String, String> {
+    async fn list_mailboxes(&self) -> Result<Json<ListMailboxesResponse>, String> {
         info!("tool.list_mailboxes");
         let mut client = self.client.lock().await;
         let result = client.list_mailboxes().await.map_err(|e| {
             error!(error = %e, "tool.list_mailboxes failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -54,14 +59,14 @@ impl ProtonMailService {
     async fn resolve_special_mailbox(
         &self,
         Parameters(req): Parameters<ResolveSpecialMailboxRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<ResolveSpecialMailboxResponse>, String> {
         info!(kind = ?req.kind, "tool.resolve_special_mailbox");
         let mut client = self.client.lock().await;
         let result = client.resolve_special_mailbox(req).await.map_err(|e| {
             error!(error = %e, "tool.resolve_special_mailbox failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -72,14 +77,14 @@ impl ProtonMailService {
     async fn list_messages(
         &self,
         Parameters(req): Parameters<ListMessagesRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<ListMessagesResponse>, String> {
         info!(mailbox = %req.mailbox_name, limit = req.limit, before_uid = ?req.before_uid, "tool.list_messages");
         let mut client = self.client.lock().await;
         let result = client.list_messages(req).await.map_err(|e| {
             error!(error = %e, "tool.list_messages failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -90,14 +95,14 @@ impl ProtonMailService {
     async fn get_message(
         &self,
         Parameters(req): Parameters<GetMessageRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<GetMessageResponse>, String> {
         info!(mailbox = %req.mailbox_name, uid = req.uid, "tool.get_message");
         let mut client = self.client.lock().await;
         let result = client.get_message(req).await.map_err(|e| {
             error!(error = %e, "tool.get_message failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -108,14 +113,14 @@ impl ProtonMailService {
     async fn search_messages(
         &self,
         Parameters(req): Parameters<SearchMessagesRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<SearchMessagesResponse>, String> {
         info!(mailbox = %req.mailbox_name, before_uid = ?req.before_uid, "tool.search_messages");
         let mut client = self.client.lock().await;
         let result = client.search_messages(req).await.map_err(|e| {
             error!(error = %e, "tool.search_messages failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -126,14 +131,14 @@ impl ProtonMailService {
     async fn get_mailbox_status(
         &self,
         Parameters(req): Parameters<GetMailboxStatusRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<GetMailboxStatusResponse>, String> {
         info!(mailbox = %req.mailbox_name, "tool.get_mailbox_status");
         let mut client = self.client.lock().await;
         let result = client.get_mailbox_status(req).await.map_err(|e| {
             error!(error = %e, "tool.get_mailbox_status failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -144,14 +149,14 @@ impl ProtonMailService {
     async fn get_attachment(
         &self,
         Parameters(req): Parameters<GetAttachmentRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<GetAttachmentResponse>, String> {
         info!(mailbox = %req.mailbox_name, uid = req.uid, index = req.attachment_index, "tool.get_attachment");
         let mut client = self.client.lock().await;
         let result = client.get_attachment(req).await.map_err(|e| {
             error!(error = %e, "tool.get_attachment failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -167,14 +172,14 @@ impl ProtonMailService {
     async fn archive_message(
         &self,
         Parameters(req): Parameters<ArchiveMessageRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<ArchiveMessageResponse>, String> {
         info!(source = %req.source_mailbox, uid = req.uid, "tool.archive_message");
         let mut client = self.client.lock().await;
         let result = client.archive_message(req).await.map_err(|e| {
             error!(error = %e, "tool.archive_message failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -190,14 +195,14 @@ impl ProtonMailService {
     async fn trash_message(
         &self,
         Parameters(req): Parameters<TrashMessageRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<TrashMessageResponse>, String> {
         info!(source = %req.source_mailbox, uid = req.uid, "tool.trash_message");
         let mut client = self.client.lock().await;
         let result = client.trash_message(req).await.map_err(|e| {
             error!(error = %e, "tool.trash_message failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -213,14 +218,14 @@ impl ProtonMailService {
     async fn archive_messages(
         &self,
         Parameters(req): Parameters<MessageBatchRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<MessageBatchResponse>, String> {
         info!(source = %req.source_mailbox, count = req.messages.len(), "tool.archive_messages");
         let mut client = self.client.lock().await;
         let result = client.archive_messages(req).await.map_err(|e| {
             error!(error = %e, "tool.archive_messages failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -236,14 +241,14 @@ impl ProtonMailService {
     async fn trash_messages(
         &self,
         Parameters(req): Parameters<MessageBatchRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<MessageBatchResponse>, String> {
         info!(source = %req.source_mailbox, count = req.messages.len(), "tool.trash_messages");
         let mut client = self.client.lock().await;
         let result = client.trash_messages(req).await.map_err(|e| {
             error!(error = %e, "tool.trash_messages failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -259,14 +264,14 @@ impl ProtonMailService {
     async fn move_message(
         &self,
         Parameters(req): Parameters<MoveMessageRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<MoveMessageResponse>, String> {
         info!(source = %req.source_mailbox, destination = %req.destination_mailbox, uid = req.uid, "tool.move_message");
         let mut client = self.client.lock().await;
         let result = client.move_message(req).await.map_err(|e| {
             error!(error = %e, "tool.move_message failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -282,14 +287,14 @@ impl ProtonMailService {
     async fn move_messages(
         &self,
         Parameters(req): Parameters<MoveMessagesRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<MessageBatchResponse>, String> {
         info!(source = %req.source_mailbox, destination = %req.destination_mailbox, count = req.messages.len(), "tool.move_messages");
         let mut client = self.client.lock().await;
         let result = client.move_messages(req).await.map_err(|e| {
             error!(error = %e, "tool.move_messages failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -304,14 +309,14 @@ impl ProtonMailService {
     async fn mark_as_read(
         &self,
         Parameters(req): Parameters<MarkAsReadRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<MarkAsReadResponse>, String> {
         info!(source = %req.source_mailbox, uid = req.uid, read = req.read, "tool.mark_as_read");
         let mut client = self.client.lock().await;
         let result = client.mark_as_read(req).await.map_err(|e| {
             error!(error = %e, "tool.mark_as_read failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -326,14 +331,14 @@ impl ProtonMailService {
     async fn set_flagged(
         &self,
         Parameters(req): Parameters<SetFlaggedRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<SetFlaggedResponse>, String> {
         info!(source = %req.source_mailbox, uid = req.uid, flagged = req.flagged, "tool.set_flagged");
         let mut client = self.client.lock().await;
         let result = client.set_flagged(req).await.map_err(|e| {
             error!(error = %e, "tool.set_flagged failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -348,7 +353,7 @@ impl ProtonMailService {
     async fn draft_email(
         &self,
         Parameters(req): Parameters<DraftEmailRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<DraftEmailResponse>, String> {
         info!(
             drafts_mailbox = %req.drafts_mailbox,
             to_count = req.to.len(),
@@ -360,7 +365,7 @@ impl ProtonMailService {
             error!(error = %e, "tool.draft_email failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 
     #[tool(
@@ -371,14 +376,14 @@ impl ProtonMailService {
     async fn list_messages_by_thread(
         &self,
         Parameters(req): Parameters<ListMessagesByThreadRequest>,
-    ) -> Result<String, String> {
+    ) -> Result<Json<ListMessagesByThreadResponse>, String> {
         info!(mailbox = %req.mailbox_name, uid = ?req.uid, has_message_id = req.message_id.is_some(), has_subject = req.subject.is_some(), "tool.list_messages_by_thread");
         let mut client = self.client.lock().await;
         let result = client.list_messages_by_thread(req).await.map_err(|e| {
             error!(error = %e, "tool.list_messages_by_thread failed");
             e
         })?;
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        Ok(Json(result))
     }
 }
 
@@ -415,5 +420,181 @@ impl ServerHandler for ProtonMailService {
                     .with_title("Proton Mail")
                     .with_description("MCP server for reading and organizing Proton Mail via IMAP through Proton Mail Bridge"),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::handler::server::tool::IntoCallToolResult;
+    use rmcp::model::CallToolResponse;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn every_tool_advertises_an_output_schema() {
+        let tools = ProtonMailService::tool_router().list_all();
+        assert_eq!(tools.len(), 17);
+        let missing: Vec<_> = tools
+            .iter()
+            .filter(|tool| tool.output_schema.is_none())
+            .map(|tool| tool.name.as_ref())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "tools missing output schemas: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn output_schemas_describe_each_tools_result_fields() {
+        let tools = ProtonMailService::tool_router().list_all();
+        let expected = [
+            ("list_mailboxes", "array", vec![]),
+            ("resolve_special_mailbox", "object", vec!["kind", "name"]),
+            (
+                "list_messages",
+                "object",
+                vec!["messages", "total_in_mailbox", "next_cursor"],
+            ),
+            (
+                "get_message",
+                "object",
+                vec!["uid", "body_text", "body_html", "attachments"],
+            ),
+            (
+                "search_messages",
+                "object",
+                vec!["messages", "total_matches", "next_cursor"],
+            ),
+            (
+                "get_mailbox_status",
+                "object",
+                vec!["mailbox_name", "messages", "unseen", "uid_validity"],
+            ),
+            (
+                "get_attachment",
+                "object",
+                vec!["uid", "attachment_index", "content_base64"],
+            ),
+            (
+                "archive_message",
+                "object",
+                vec!["uid", "source_mailbox", "destination_mailbox"],
+            ),
+            ("trash_message", "object", vec!["uid", "source_mailbox"]),
+            (
+                "archive_messages",
+                "object",
+                vec![
+                    "source_mailbox",
+                    "destination_mailbox",
+                    "moved",
+                    "not_found",
+                ],
+            ),
+            (
+                "trash_messages",
+                "object",
+                vec![
+                    "source_mailbox",
+                    "destination_mailbox",
+                    "moved",
+                    "not_found",
+                ],
+            ),
+            (
+                "move_message",
+                "object",
+                vec!["uid", "source_mailbox", "destination_mailbox"],
+            ),
+            (
+                "move_messages",
+                "object",
+                vec![
+                    "source_mailbox",
+                    "destination_mailbox",
+                    "moved",
+                    "not_found",
+                ],
+            ),
+            (
+                "mark_as_read",
+                "object",
+                vec!["uid", "source_mailbox", "read"],
+            ),
+            (
+                "set_flagged",
+                "object",
+                vec!["uid", "source_mailbox", "flagged"],
+            ),
+            (
+                "draft_email",
+                "object",
+                vec!["drafts_mailbox", "message_id", "threaded"],
+            ),
+            (
+                "list_messages_by_thread",
+                "object",
+                vec!["messages", "total_in_thread"],
+            ),
+        ];
+        expected.iter().for_each(|(name, kind, fields)| {
+            let tool = tools.iter().find(|tool| tool.name == *name).unwrap();
+            let wire = serde_json::to_value(tool).unwrap();
+            let schema = &wire["outputSchema"];
+            assert_eq!(schema["type"], *kind, "{name}");
+            fields.iter().for_each(|field| {
+                assert!(schema["properties"].get(field).is_some(), "{name}.{field}");
+            });
+            if *kind == "array" {
+                assert!(schema.get("items").is_some(), "{name}");
+            }
+        });
+    }
+
+    fn assert_structured_result<T: serde::Serialize + schemars::JsonSchema + 'static>(value: T) {
+        let expected = serde_json::to_value(&value).unwrap();
+        let response: Result<Json<T>, String> = Ok(Json(value));
+        let CallToolResponse::Complete(result) = response.into_call_tool_result().unwrap() else {
+            panic!("expected a complete result");
+        };
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(result.structured_content, Some(expected.clone()));
+        let text = result.content[0].as_text().unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&text.text).unwrap(), expected);
+    }
+
+    #[test]
+    fn structured_results_preserve_objects_arrays_and_text_fallback() {
+        assert_structured_result(ArchiveMessageResponse {
+            uid: 42,
+            source_mailbox: "INBOX".into(),
+            destination_mailbox: "Archive".into(),
+        });
+        assert_structured_result(ListMessagesResponse {
+            messages: vec![],
+            total_in_mailbox: 0,
+            next_cursor: None,
+        });
+        let mailboxes: ListMailboxesResponse = serde_json::from_value(json!([{
+            "name": "INBOX", "attributes": [], "delimiter": "/", "special_use": "inbox"
+        }]))
+        .unwrap();
+        assert_structured_result(mailboxes);
+    }
+
+    #[test]
+    fn tool_errors_remain_unstructured_error_results() {
+        let response: Result<Json<ArchiveMessageResponse>, String> =
+            Err("message not found".into());
+        let CallToolResponse::Complete(result) = response.into_call_tool_result().unwrap() else {
+            panic!("expected a complete result");
+        };
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.structured_content.is_none());
+        assert_eq!(
+            result.content[0].as_text().unwrap().text,
+            "message not found"
+        );
     }
 }

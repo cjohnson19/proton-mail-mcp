@@ -108,9 +108,15 @@ and [authentication requirements](https://developers.openai.com/plugins/build/au
 
 ## Tools
 
+All tools advertise an `outputSchema` generated from their response types and
+return matching JSON in `structuredContent`, plus a serialized JSON text fallback.
+`list_mailboxes` returns an array; all other tools return objects. Tool failures
+return text with `isError: true` instead of a structured success result.
+
 | Tool | Description |
 |------|-------------|
 | `list_mailboxes` | List all mailboxes |
+| `resolve_special_mailbox` | Resolve a well-known folder kind to its IMAP mailbox name |
 | `list_messages` | List messages in a mailbox with pagination |
 | `get_message` | Fetch a full message (headers, body, attachments) |
 | `search_messages` | Search with filters and cursor-based pagination |
