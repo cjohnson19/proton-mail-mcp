@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 const DEFAULT_REDIRECT_URIS: &[&str] = &[
     "https://claude.ai/api/mcp/auth_callback",
     "https://claude.com/api/mcp/auth_callback",
+    "https://chatgpt.com/connector_platform_oauth_redirect",
 ];
 
 const CODE_TTL_SECS: u64 = 120;
@@ -195,6 +196,7 @@ impl AuthState {
         };
         let reject = |error, description| {
             Err(AuthorizeReject::Errored {
+                issuer: self.config.public_url.clone(),
                 redirect_uri: redirect_uri.clone(),
                 error,
                 description,
@@ -240,6 +242,7 @@ struct ValidatedAuthorize {
 enum AuthorizeReject {
     BadRedirect,
     Errored {
+        issuer: String,
         redirect_uri: String,
         error: &'static str,
         description: &'static str,
@@ -254,12 +257,17 @@ impl IntoResponse for AuthorizeReject {
                 (StatusCode::BAD_REQUEST, "invalid or missing redirect_uri").into_response()
             }
             Self::Errored {
+                issuer,
                 redirect_uri,
                 error,
                 description,
                 state,
             } => {
-                let mut params = vec![("error", error), ("error_description", description)];
+                let mut params = vec![
+                    ("error", error),
+                    ("error_description", description),
+                    ("iss", issuer.as_str()),
+                ];
                 if let Some(state) = state.as_deref() {
                     params.push(("state", state));
                 }
@@ -336,6 +344,7 @@ async fn authorization_server_metadata(
     let base = &state.config.public_url;
     Json(json!({
         "issuer": base,
+        "authorization_response_iss_parameter_supported": true,
         "authorization_endpoint": format!("{base}/authorize"),
         "token_endpoint": format!("{base}/token"),
         "registration_endpoint": format!("{base}/register"),
@@ -438,7 +447,10 @@ async fn authorize_submit(
         Some(validated.redirect_uri.clone()),
         Some(validated.code_challenge),
     );
-    let mut params = vec![("code", code.as_str())];
+    let mut params = vec![
+        ("code", code.as_str()),
+        ("iss", state.config.public_url.as_str()),
+    ];
     if let Some(state_param) = validated.state.as_deref() {
         params.push(("state", state_param));
     }

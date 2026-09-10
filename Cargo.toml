@@ -12,7 +12,7 @@ mail-builder = "0.4"
 mailparse = "0.15"
 native-tls = "0.2.18"
 axum = "0.8"
-rmcp = { version = "0.16.0", features = [
+rmcp = { version = "3.3.0", features = [
     "server",
     "transport-io",
     "transport-streamable-http-server",

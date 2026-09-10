@@ -17,6 +17,7 @@ use proton_mail_mcp::auth::{self, AuthConfig, AuthState};
 const PUBLIC_URL: &str = "https://mcp.example.com";
 const PASSPHRASE: &str = "correct horse battery staple";
 const CALLBACK: &str = "https://claude.ai/api/mcp/auth_callback";
+const CHATGPT_CALLBACK: &str = "https://chatgpt.com/connector_platform_oauth_redirect";
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
 fn test_app() -> Router {
@@ -95,6 +96,7 @@ async fn obtain_code(app: &Router) -> String {
     assert!(location.starts_with(CALLBACK));
     let params = location_params(&response);
     assert_eq!(params["state"], "opaque-state-123");
+    assert_eq!(params["iss"], PUBLIC_URL);
     params["code"].clone()
 }
 
@@ -154,6 +156,7 @@ async fn metadata_endpoints() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
     assert_eq!(json["issuer"], PUBLIC_URL);
+    assert_eq!(json["authorization_response_iss_parameter_supported"], true);
     assert_eq!(
         json["authorization_endpoint"],
         format!("{PUBLIC_URL}/authorize")
@@ -252,6 +255,109 @@ async fn full_flow_authorize_token_bearer_refresh() {
 }
 
 #[tokio::test]
+async fn chatgpt_registration_authorize_token_bearer_refresh() {
+    let app = test_app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "redirect_uris": [CHATGPT_CALLBACK],
+                        "client_name": "ChatGPT",
+                        "token_endpoint_auth_method": "none"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let registration: serde_json::Value =
+        serde_json::from_str(&body_string(response).await).unwrap();
+    let client_id = registration["client_id"].as_str().unwrap();
+    let resource = format!("{PUBLIC_URL}/mcp");
+    let uri = authorize_uri(CHATGPT_CALLBACK, Some(&resource)).replace("test-client", client_id);
+    let page = app
+        .clone()
+        .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let response = submit_passphrase(&app, &uri, PASSPHRASE).await;
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let location = response.headers()[header::LOCATION].to_str().unwrap();
+    assert_eq!(location.split_once('?').unwrap().0, CHATGPT_CALLBACK);
+    let params = location_params(&response);
+    assert_eq!(params["iss"], PUBLIC_URL);
+    assert_eq!(params["state"], "opaque-state-123");
+    let (status, tokens) = exchange(
+        &app,
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", &params["code"]),
+            ("client_id", client_id),
+            ("redirect_uri", CHATGPT_CALLBACK),
+            ("code_verifier", VERIFIER),
+            ("resource", &resource),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let access = tokens["access_token"].as_str().unwrap();
+    assert_eq!(
+        get_with_bearer(&app, Some(access)).await.status(),
+        StatusCode::OK
+    );
+    let (status, refreshed) = exchange(
+        &app,
+        &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", tokens["refresh_token"].as_str().unwrap()),
+            ("client_id", client_id),
+            ("resource", &resource),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let access = refreshed["access_token"].as_str().unwrap();
+    assert_eq!(
+        get_with_bearer(&app, Some(access)).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn chatgpt_callback_lookalikes_are_rejected() {
+    let app = test_app();
+    let requests = [
+        "https://chatgpt.com.evil.example/connector_platform_oauth_redirect",
+        "https://chatgpt.com@evil.example/connector_platform_oauth_redirect",
+        "http://chatgpt.com/connector_platform_oauth_redirect",
+        "https://chatgpt.com/connector_platform_oauth_redirect/extra",
+        "https://chatgpt.com/connector_platform_oauth_redirect?next=https://evil.example",
+    ]
+    .map(|callback| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::get(authorize_uri(callback, None))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(!response.headers().contains_key(header::LOCATION));
+        }
+    });
+    futures::future::join_all(requests).await;
+}
+
+#[tokio::test]
 async fn code_is_single_use() {
     let app = test_app();
     let code = obtain_code(&app).await;
@@ -345,6 +451,7 @@ async fn authorize_rejects_foreign_resource() {
     let params = location_params(&response);
     assert_eq!(params["error"], "invalid_target");
     assert_eq!(params["state"], "opaque-state-123");
+    assert_eq!(params["iss"], PUBLIC_URL);
 }
 
 #[tokio::test]

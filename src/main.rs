@@ -3,9 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::ServiceExt;
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -103,15 +100,17 @@ async fn serve_http(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // One ProtonMailService is cloned per HTTP session; clones share the same
     // Arc<Mutex<EmailClient>>, so all sessions reuse a single Bridge connection.
-    let mcp_service = StreamableHttpService::new(
-        move || Ok(service.clone()),
-        LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
-    );
-    let app = match AuthConfig::from_env().map_err(|e| {
+    let auth_config = AuthConfig::from_env().map_err(|e| {
         error!("{e}");
         e
-    })? {
+    })?;
+    let mcp_service = proton_mail_mcp::http::mcp_service(
+        service,
+        auth_config
+            .as_ref()
+            .map(|config| config.public_url.as_str()),
+    )?;
+    let app = match auth_config {
         Some(config) => {
             info!("OAuth enabled; issuer {}", config.public_url);
             let state = Arc::new(AuthState::new(config));

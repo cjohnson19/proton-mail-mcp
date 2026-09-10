@@ -385,8 +385,8 @@ impl ProtonMailService {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ProtonMailService {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(concat!(
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(concat!(
                 "Read and organize a Proton Mail inbox via IMAP. ",
                 "Read-only by default; can also archive, move, mark, and draft messages.\n",
                 "\n",
@@ -409,16 +409,11 @@ impl ServerHandler for ProtonMailService {
                 "- Dates in search use DD-Mon-YYYY format (e.g. \"01-Jan-2024\"). `since` is inclusive, `before` is exclusive.\n",
                 "- get_message does not mark messages as read; use mark_as_read separately.\n",
                 "- draft_email writes to the Drafts mailbox; to reply, pass in_reply_to with the source mailbox and UID. Sending is not supported.",
-            ).into()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "proton-mail-mcp".into(),
-                title: Some("Proton Mail".into()),
-                version: env!("CARGO_PKG_VERSION").into(),
-                description: Some("MCP server for reading and organizing Proton Mail via IMAP through Proton Mail Bridge".into()),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+            ))
+            .with_server_info(
+                Implementation::new("proton-mail-mcp", env!("CARGO_PKG_VERSION"))
+                    .with_title("Proton Mail")
+                    .with_description("MCP server for reading and organizing Proton Mail via IMAP through Proton Mail Bridge"),
+            )
     }
 }
