@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,6 +7,7 @@ use rmcp::ServiceExt;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use proton_mail_mcp::attachments::{self, AttachmentSigner, DeliveryConfig, LinkDelivery};
 use proton_mail_mcp::auth::{self, AuthConfig, AuthState};
 use proton_mail_mcp::email_client::EmailClient;
 use proton_mail_mcp::server::ProtonMailService;
@@ -45,12 +47,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let inline_max_bytes = match env::var("MCP_ATTACHMENT_INLINE_MAX_BYTES") {
+        Ok(raw) => raw.parse().map_err(|_| {
+            error!("MCP_ATTACHMENT_INLINE_MAX_BYTES must be a byte count");
+            "MCP_ATTACHMENT_INLINE_MAX_BYTES must be a byte count"
+        })?,
+        Err(_) => attachments::DEFAULT_INLINE_MAX_BYTES,
+    };
+
     let client = connect_with_retry(&hostname, port, &username, &password, direct_tls).await?;
-    let service = ProtonMailService::new(client);
 
     match env::var("MCP_BIND") {
-        Ok(bind) => serve_http(service, &bind).await,
-        Err(_) => serve_stdio(service).await,
+        Ok(bind) => serve_http(client, &bind, inline_max_bytes).await,
+        Err(_) => serve_stdio(client, inline_max_bytes).await,
     }
 }
 
@@ -87,7 +96,19 @@ async fn connect_with_retry(
     Err(last_err.unwrap().into())
 }
 
-async fn serve_stdio(service: ProtonMailService) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve_stdio(
+    client: EmailClient,
+    inline_max_bytes: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = env::var_os("MCP_ATTACHMENT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::temp_dir().join("proton-mail-mcp"));
+    info!("large attachments will be written under {}", dir.display());
+    let delivery = Arc::new(DeliveryConfig {
+        inline_max_bytes,
+        link: LinkDelivery::File { dir },
+    });
+    let service = ProtonMailService::new(client, delivery);
     let server = service.serve(rmcp::transport::io::stdio()).await?;
     info!("MCP server running on stdio");
     server.waiting().await?;
@@ -95,8 +116,9 @@ async fn serve_stdio(service: ProtonMailService) -> Result<(), Box<dyn std::erro
 }
 
 async fn serve_http(
-    service: ProtonMailService,
+    client: EmailClient,
     bind: &str,
+    inline_max_bytes: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // One ProtonMailService is cloned per HTTP session; clones share the same
     // Arc<Mutex<EmailClient>>, so all sessions reuse a single Bridge connection.
@@ -104,6 +126,16 @@ async fn serve_http(
         error!("{e}");
         e
     })?;
+    let signer = Arc::new(match &auth_config {
+        Some(config) => AttachmentSigner::new(&config.public_url, &config.signing_key),
+        None => AttachmentSigner::ephemeral(&local_base_url(bind)),
+    });
+    let delivery = Arc::new(DeliveryConfig {
+        inline_max_bytes,
+        link: LinkDelivery::SignedUrl(signer.clone()),
+    });
+    let service = ProtonMailService::new(client, delivery);
+    let attachment_routes = attachments::router(signer, service.email_client());
     let mcp_service = proton_mail_mcp::http::mcp_service(
         service,
         auth_config
@@ -127,9 +159,21 @@ async fn serve_http(
             axum::Router::new().nest_service("/mcp", mcp_service)
         }
     }
+    .merge(attachment_routes)
     .route("/healthz", axum::routing::get(|| async { "ok" }));
     let listener = tokio::net::TcpListener::bind(bind).await?;
     info!("MCP server (streamable-http) listening on {bind}, endpoint /mcp");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Origin for attachment links when no `MCP_PUBLIC_URL` is configured:
+/// the bind address, with wildcard hosts rewritten to loopback.
+fn local_base_url(bind: &str) -> String {
+    let (host, port) = bind.rsplit_once(':').unwrap_or((bind, "80"));
+    let host = match host {
+        "0.0.0.0" | "[::]" | "::" | "" => "127.0.0.1",
+        other => other,
+    };
+    format!("http://{host}:{port}")
 }

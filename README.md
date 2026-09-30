@@ -26,6 +26,28 @@ MCP server for Proton Mail. Connects via IMAP through [Proton Mail Bridge](https
 
 `PROTON_HOSTNAME` (default `127.0.0.1`) and `PROTON_PORT` (default `1143`) can also be set if needed.
 
+### Attachments
+
+`get_attachment` embeds attachments up to `MCP_ATTACHMENT_INLINE_MAX_BYTES`
+(default 16 KiB) as base64. Larger ones, or any request with
+`delivery: "link"`, are handed back out of band so the size is not limited
+by the MCP tool-result channel:
+
+- **stdio:** the bytes are written under `MCP_ATTACHMENT_DIR` (default
+  `$TMPDIR/proton-mail-mcp`) and the response carries `file_path`.
+- **HTTP:** the response carries a signed `download_url`
+  (`/attachments/{token}`, valid for one hour, no OAuth token needed) that
+  streams the raw bytes with the right `Content-Type`. Links are signed with
+  a key derived from `MCP_OAUTH_SIGNING_KEY`, or a per-process random key
+  when OAuth is off.
+
+Either way the result also includes a `resource_link` content block.
+
+To read a document rather than fetch it, pass `delivery: "text"`: the server
+extracts text from PDF, HTML, and plain-text attachments (txt, csv, json,
+ics, ...) and returns it in `text`, paged with `text_offset` /
+`max_text_chars` (default 40 000 characters) and `text_next_offset`.
+
 ## Remote endpoint (HTTP + OAuth)
 
 Setting `MCP_BIND` (e.g. `0.0.0.0:8080`) serves streamable-HTTP at `/mcp`
@@ -121,7 +143,7 @@ return text with `isError: true` instead of a structured success result.
 | `get_message` | Fetch a full message (headers, body, attachments) |
 | `search_messages` | Search with filters and cursor-based pagination |
 | `get_mailbox_status` | Mailbox stats (count, recent, unseen) |
-| `get_attachment` | Download an attachment (base64-encoded) |
+| `get_attachment` | Download an attachment (inline base64, a download URL / file path for large ones, or extracted text) |
 | `list_messages_by_thread` | Find related messages by Message-ID or subject |
 | `archive_message` | Move a message to Archive |
 | `trash_message` | Move a message to Trash |

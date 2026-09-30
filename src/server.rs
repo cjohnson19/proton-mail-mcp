@@ -3,12 +3,13 @@ use std::sync::Arc;
 use rmcp::{
     Json, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{Implementation, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
+use crate::attachments::{self, DeliveryConfig};
 use crate::email_client::{
     ArchiveMessageRequest, ArchiveMessageResponse, DraftEmailRequest, DraftEmailResponse,
     EmailClient, GetAttachmentRequest, GetAttachmentResponse, GetMailboxStatusRequest,
@@ -24,16 +25,23 @@ use crate::email_client::{
 #[derive(Clone)]
 pub struct ProtonMailService {
     client: Arc<Mutex<EmailClient>>,
+    delivery: Arc<DeliveryConfig>,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl ProtonMailService {
-    pub fn new(client: EmailClient) -> Self {
+    pub fn new(client: EmailClient, delivery: Arc<DeliveryConfig>) -> Self {
         Self {
             client: Arc::new(Mutex::new(client)),
+            delivery,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// The IMAP connection shared by every session of this service.
+    pub fn email_client(&self) -> Arc<Mutex<EmailClient>> {
+        self.client.clone()
     }
 
     #[tool(
@@ -143,20 +151,30 @@ impl ProtonMailService {
 
     #[tool(
         title = "Get Attachment",
-        description = "Download a specific attachment from a message by UID and 0-based attachment index (matching the order from get_message). Returns base64-encoded content.",
+        description = "Download a specific attachment from a message by UID and 0-based attachment index (matching the order from get_message). Small attachments come back inline as base64 (`content_base64`); larger ones come back as a time-limited `download_url` (HTTP mode) or a `file_path` on the server's machine (stdio mode), also emitted as a resource_link content block. Check `delivery` to see which. Pass delivery=\"link\" to always get a link, e.g. when the user wants to download the file rather than have you read it. Pass delivery=\"text\" to get extracted text from PDF, HTML, or plain-text attachments (CSV, JSON, ICS, ...) instead of bytes — the best choice when you need to read the document; long texts are paged via `text_offset` / `text_next_offset`.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<GetAttachmentResponse>(),
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn get_attachment(
         &self,
         Parameters(req): Parameters<GetAttachmentRequest>,
-    ) -> Result<Json<GetAttachmentResponse>, String> {
-        info!(mailbox = %req.mailbox_name, uid = req.uid, index = req.attachment_index, "tool.get_attachment");
-        let mut client = self.client.lock().await;
-        let result = client.get_attachment(req).await.map_err(|e| {
+    ) -> Result<CallToolResult, String> {
+        info!(mailbox = %req.mailbox_name, uid = req.uid, index = req.attachment_index, delivery = ?req.delivery, "tool.get_attachment");
+        let fetched = self
+            .client
+            .lock()
+            .await
+            .fetch_attachment(&req.mailbox_name, req.uid, req.attachment_index)
+            .await;
+        let data = fetched.map_err(|e| {
             error!(error = %e, "tool.get_attachment failed");
             e
         })?;
-        Ok(Json(result))
+        let response = self.delivery.deliver(&req, data).await.map_err(|e| {
+            error!(error = %e, "tool.get_attachment delivery failed");
+            e
+        })?;
+        attachments::tool_result(response)
     }
 
     #[tool(
@@ -398,7 +416,7 @@ impl ServerHandler for ProtonMailService {
                 "Capabilities:\n",
                 "- Browse mailboxes and list/search messages with pagination\n",
                 "- Read full message content (text auto-extracted from HTML)\n",
-                "- Download attachments (base64-encoded)\n",
+                "- Download attachments: small ones inline as base64, large ones as a time-limited download URL (or a file path in stdio mode)\n",
                 "- Find conversation threads by UID, Message-ID, or subject\n",
                 "- Archive, trash, or move messages (one at a time, or several per call with archive_messages/trash_messages/move_messages), mark read/unread, star/unstar\n",
                 "- Save drafts (including threaded replies) to the Drafts mailbox\n",
@@ -413,6 +431,7 @@ impl ServerHandler for ProtonMailService {
                 "- Pagination: list_messages and search_messages return a `next_cursor` field — pass it as `before_uid` on the next call. `None` means end of results.\n",
                 "- Dates in search use DD-Mon-YYYY format (e.g. \"01-Jan-2024\"). `since` is inclusive, `before` is exclusive.\n",
                 "- get_message does not mark messages as read; use mark_as_read separately.\n",
+                "- get_attachment returns `delivery` = \"inline\" (content_base64), \"url\" (download_url, expires in about an hour; give it to the user to download), \"file\" (file_path on the server's machine), or \"text\" (extracted text). Pass delivery=\"text\" to read a PDF/HTML/text attachment, and delivery=\"link\" when the user wants the file rather than its contents.\n",
                 "- draft_email writes to the Drafts mailbox; to reply, pass in_reply_to with the source mailbox and UID. Sending is not supported.",
             ))
             .with_server_info(
@@ -474,7 +493,16 @@ mod tests {
             (
                 "get_attachment",
                 "object",
-                vec!["uid", "attachment_index", "content_base64"],
+                vec![
+                    "uid",
+                    "attachment_index",
+                    "delivery",
+                    "content_base64",
+                    "download_url",
+                    "file_path",
+                    "text",
+                    "text_next_offset",
+                ],
             ),
             (
                 "archive_message",

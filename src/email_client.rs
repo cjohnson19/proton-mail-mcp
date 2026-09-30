@@ -4,7 +4,6 @@ use async_imap::{
     Session,
     types::{Fetch, Flag, Mailbox, Name, NameAttribute},
 };
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures::TryStreamExt;
 use mail_builder::{MessageBuilder, headers::address::Address, mime::make_boundary};
 use mailparse::{MailAddr, MailHeaderMap, addrparse_header};
@@ -418,6 +417,20 @@ pub struct GetMailboxStatusResponse {
     pub uid_validity: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentDeliveryPreference {
+    /// Embed small attachments as base64; return a download link for large ones
+    #[default]
+    Auto,
+    /// Always embed the content as base64, regardless of size
+    Inline,
+    /// Always return a download link (HTTP mode) or file path (stdio mode), never inline content
+    Link,
+    /// Extract readable text (PDF, HTML, plain text, CSV, JSON, ...) and return it in `text`, paged by `text_offset` / `max_text_chars`
+    Text,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetAttachmentRequest {
     /// Name of the mailbox containing the message
@@ -428,9 +441,32 @@ pub struct GetAttachmentRequest {
     pub uid: u32,
     /// 0-based attachment index (matches order from get_message)
     pub attachment_index: usize,
+    /// How to deliver the content. "auto" (default) embeds attachments up to the server's inline limit as base64 and returns a download link above it; "inline" forces base64; "link" always returns a download link instead of content; "text" extracts readable text (PDF, HTML, plain text) instead of returning bytes.
+    #[serde(default)]
+    pub delivery: AttachmentDeliveryPreference,
+    /// For delivery="text": character offset to start from, for paging long documents (default 0). Use `text_next_offset` from the previous response.
+    #[serde(default)]
+    pub text_offset: Option<usize>,
+    /// For delivery="text": maximum number of characters to return in this call (default 40000)
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub max_text_chars: Option<usize>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentDeliveryKind {
+    /// Content is in `content_base64`
+    Inline,
+    /// Content is served at `download_url`
+    Url,
+    /// Content was written to `file_path` on the machine running this server
+    File,
+    /// Extracted text is in `text`
+    Text,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GetAttachmentResponse {
     /// UID of the message containing the attachment
     pub uid: u32,
@@ -442,8 +478,31 @@ pub struct GetAttachmentResponse {
     pub mime_type: String,
     /// Size of the attachment in bytes
     pub size_bytes: usize,
-    /// Base64-encoded attachment content
-    pub content_base64: String,
+    /// How the content was delivered: "inline" (see content_base64), "url" (see download_url), "file" (see file_path), or "text" (see text)
+    pub delivery: AttachmentDeliveryKind,
+    /// Base64-encoded attachment content; present only when delivery is "inline"
+    pub content_base64: Option<String>,
+    /// Time-limited URL serving the raw bytes with the correct Content-Type; present only when delivery is "url". Share it with the user so they can download the file directly.
+    pub download_url: Option<String>,
+    /// Absolute path of a file holding the raw bytes on the machine running this server; present only when delivery is "file"
+    pub file_path: Option<String>,
+    /// Unix timestamp (seconds) after which download_url stops working; present only when delivery is "url"
+    pub expires_at: Option<u64>,
+    /// Extracted text for this page; present only when delivery is "text"
+    pub text: Option<String>,
+    /// Total number of characters in the extracted text; present only when delivery is "text"
+    pub text_total_chars: Option<usize>,
+    /// Offset to pass as `text_offset` to get the next page; absent when the returned text reaches the end
+    pub text_next_offset: Option<usize>,
+}
+
+/// Raw attachment bytes plus the metadata needed to deliver them.
+#[derive(Debug, Clone)]
+pub struct AttachmentData {
+    pub filename: Option<String>,
+    pub mime_type: String,
+    pub uid_validity: Option<u32>,
+    pub content: Vec<u8>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1606,17 +1665,19 @@ impl EmailClient {
         })
     }
 
-    #[instrument(skip(self), fields(mailbox = %req.mailbox_name, uid = req.uid, index = req.attachment_index))]
-    pub async fn get_attachment(
+    #[instrument(skip(self), fields(mailbox = %mailbox_name, uid, index))]
+    pub async fn fetch_attachment(
         &mut self,
-        req: GetAttachmentRequest,
-    ) -> Result<GetAttachmentResponse, String> {
+        mailbox_name: &str,
+        uid: u32,
+        index: usize,
+    ) -> Result<AttachmentData, String> {
         self.ensure_connected().await?;
-        let mailbox = self.examine_or_suggest(&req.mailbox_name).await?;
+        let mailbox = self.examine_or_suggest(mailbox_name).await?;
 
         let fetches: Vec<Fetch> = self
             .session
-            .uid_fetch(req.uid.to_string(), "BODY.PEEK[]")
+            .uid_fetch(uid.to_string(), "BODY.PEEK[]")
             .await
             .map_err(|e| e.to_string())?
             .try_collect()
@@ -1625,22 +1686,18 @@ impl EmailClient {
 
         let fetch = fetches
             .first()
-            .ok_or_else(|| format_uid_not_found(&req.mailbox_name, req.uid, mailbox.uid_next))?;
+            .ok_or_else(|| format_uid_not_found(mailbox_name, uid, mailbox.uid_next))?;
 
         let raw = fetch.body().ok_or("Message has no body")?;
 
-        let (filename, mime_type, body) = extract_attachment_by_index(raw, req.attachment_index)?;
-        let size_bytes = body.len();
-        let content_base64 = BASE64.encode(&body);
-        debug!(mime_type = %mime_type, size_bytes, "fetched attachment");
+        let (filename, mime_type, content) = extract_attachment_by_index(raw, index)?;
+        debug!(mime_type = %mime_type, size_bytes = content.len(), "fetched attachment");
 
-        Ok(GetAttachmentResponse {
-            uid: req.uid,
-            attachment_index: req.attachment_index,
+        Ok(AttachmentData {
             filename,
             mime_type,
-            size_bytes,
-            content_base64,
+            uid_validity: mailbox.uid_validity,
+            content,
         })
     }
 
@@ -2077,7 +2134,7 @@ impl EmailClient {
 mod tests {
     use super::*;
     use schemars::schema_for;
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     fn get_property<'a>(schema: &'a Value, field: &str) -> &'a Value {
         &schema["properties"][field]
@@ -2212,6 +2269,31 @@ mod tests {
 
         let uid = get_property(&schema, "uid");
         assert_eq!(uid["minimum"], 1);
+
+        let delivery = get_property(&schema, "delivery");
+        assert_eq!(delivery["default"], "auto");
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("delivery".into()))
+        );
+    }
+
+    #[test]
+    fn get_attachment_request_delivery_defaults_to_auto() {
+        let req: GetAttachmentRequest = serde_json::from_value(json!({
+            "mailbox_name": "INBOX", "uid": 1, "attachment_index": 0
+        }))
+        .unwrap();
+        assert_eq!(req.delivery, AttachmentDeliveryPreference::Auto);
+        assert_eq!(req.text_offset, None);
+        assert_eq!(req.max_text_chars, None);
+        let req: GetAttachmentRequest = serde_json::from_value(json!({
+            "mailbox_name": "INBOX", "uid": 1, "attachment_index": 0, "delivery": "link"
+        }))
+        .unwrap();
+        assert_eq!(req.delivery, AttachmentDeliveryPreference::Link);
     }
 
     #[test]
@@ -2390,7 +2472,14 @@ mod tests {
                 "filename",
                 "mime_type",
                 "size_bytes",
+                "delivery",
                 "content_base64",
+                "download_url",
+                "file_path",
+                "expires_at",
+                "text",
+                "text_total_chars",
+                "text_next_offset",
             ],
         );
         check_descriptions(

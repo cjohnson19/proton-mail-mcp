@@ -465,22 +465,111 @@ async fn test_get_attachment() {
         .unwrap();
     let uid = list.messages[0].uid;
 
-    let resp = client
-        .get_attachment(GetAttachmentRequest {
+    let data = client.fetch_attachment("INBOX", uid, 0).await.unwrap();
+    assert_eq!(data.filename.as_deref(), Some("test.txt"));
+    assert_eq!(data.mime_type, "application/octet-stream");
+    assert_eq!(data.content, attachment_data);
+    assert!(data.uid_validity.is_some());
+
+    let missing = client.fetch_attachment("INBOX", uid, 1).await.unwrap_err();
+    assert!(missing.contains("out of range"), "{missing}");
+}
+
+#[tokio::test]
+async fn test_attachment_download_route() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use http_body_util::BodyExt;
+    use proton_mail_mcp::attachments::{self, AttachmentRef, AttachmentSigner};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use tower::util::ServiceExt;
+
+    let user = "download@localhost";
+    let attachment_data = b"binary\x00\xffpayload";
+    let mut raw = imap_session(user).await;
+    append_message(
+        &mut raw,
+        "INBOX",
+        &build_attachment_message(
+            "sender@example.com",
+            user,
+            "Big file",
+            "See attached",
+            "payload.bin",
+            attachment_data,
+        ),
+    )
+    .await;
+    raw.logout().await.ok();
+
+    let mut client = connect_client(user).await;
+    let uid = client
+        .list_messages(ListMessagesRequest {
             mailbox_name: "INBOX".into(),
-            uid,
-            attachment_index: 0,
+            limit: 1,
+            before_uid: None,
+            include_snippet: false,
         })
         .await
-        .unwrap();
+        .unwrap()
+        .messages[0]
+        .uid;
+    let uid_validity = client
+        .fetch_attachment("INBOX", uid, 0)
+        .await
+        .unwrap()
+        .uid_validity;
 
-    assert_eq!(resp.filename.as_deref(), Some("test.txt"));
-    let decoded = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &resp.content_base64,
-    )
-    .unwrap();
-    assert_eq!(decoded, attachment_data);
+    let signer = Arc::new(AttachmentSigner::new(
+        "http://localhost:8080",
+        b"route-test-secret",
+    ));
+    let app = attachments::router(signer.clone(), Arc::new(Mutex::new(client)));
+
+    let (url, _) = signer.sign(&AttachmentRef {
+        mailbox: "INBOX".into(),
+        uid,
+        uid_validity,
+        index: 0,
+    });
+    let path = url.strip_prefix("http://localhost:8080").unwrap();
+    let response = app
+        .clone()
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"payload.bin\"; filename*=UTF-8''payload.bin"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), attachment_data);
+
+    let forged = app
+        .clone()
+        .oneshot(
+            Request::get("/attachments/not-a-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::NOT_FOUND);
+
+    let (stale_url, _) = signer.sign(&AttachmentRef {
+        mailbox: "INBOX".into(),
+        uid,
+        uid_validity: Some(uid_validity.unwrap() + 1),
+        index: 0,
+    });
+    let stale_path = stale_url.strip_prefix("http://localhost:8080").unwrap();
+    let stale = app
+        .oneshot(Request::get(stale_path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::GONE);
 }
 
 #[tokio::test]
