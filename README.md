@@ -4,21 +4,18 @@ MCP server for Proton Mail. Connects via IMAP through [Proton Mail Bridge](https
 
 ## Runs locally or as a remote server
 
-Most Proton Mail MCP servers are stdio-only: they have to run on the same
-machine as your MCP client and Proton Mail Bridge, so they stop working the
-moment your laptop sleeps. This one also runs as a **remote MCP server**:
+Most Proton Mail MCP servers are stdio-only and must run on the same machine
+as the client and Proton Mail Bridge. This one also runs as a **remote MCP
+server**:
 
-- Streamable-HTTP transport at `/mcp`, so claude.ai (web, desktop, mobile),
-  Claude Code, and ChatGPT can all connect from anywhere.
-- A built-in OAuth 2.1 authorization server (dynamic client registration,
-  PKCE, short-lived JWTs). You approve a client once with a passphrase and
-  tokens refresh from there. No external identity provider is needed.
-- Large attachments are delivered through signed, time-limited download
-  links instead of being squeezed through the tool-result channel.
-- A ready-made [AWS deployment](deploy/aws/README.md): one small EC2
-  instance running Bridge, the server, and Caddy for TLS, with every secret
-  in SSM Parameter Store and in-place app updates that never disturb the
-  Bridge login.
+- Streamable-HTTP transport at `/mcp` for claude.ai (web, desktop, mobile),
+  Claude Code, and ChatGPT.
+- Built-in OAuth 2.1 authorization server (dynamic client registration,
+  PKCE, short-lived JWTs), approved once with a passphrase.
+- Large attachments delivered as signed, time-limited download links.
+- A ready-made [AWS deployment](deploy/aws/README.md): one EC2 instance
+  running Bridge, the server, and Caddy for TLS, with secrets in SSM
+  Parameter Store.
 
 Local stdio mode is still fully supported; see [Setup](#setup). For the
 remote mode, see [Remote endpoint](#remote-endpoint-http--oauth) and the
