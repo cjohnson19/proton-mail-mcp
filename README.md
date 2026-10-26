@@ -9,6 +9,12 @@ MCP server for Proton Mail. Connects via IMAP through [Proton Mail Bridge](https
 
 ## Setup
 
+For local use the server runs over stdio; point your MCP client at the
+binary with the Bridge credentials in its environment. Build it once with
+`cargo build --release` (binary at `target/release/proton-mail-mcp`), or let
+the client run it through `cargo run` as below. See [Claude setup](#claude-setup)
+for where this configuration goes.
+
 ```json
 {
   "mcpServers": {
@@ -63,14 +69,77 @@ MCP_OAUTH_PASSPHRASE='entered once when authorizing a client (12+ chars)'
 MCP_OAUTH_SIGNING_KEY="$(openssl rand -hex 32)" # rotating revokes all tokens
 ```
 
-Add `https://your-domain.example/mcp` as a claude.ai custom connector with
-the OAuth fields blank; Claude registers itself and opens the passphrase
-page. `MCP_OAUTH_REDIRECT_ALLOWLIST` (comma-separated) admits additional
-OAuth callbacks beyond Claude, ChatGPT's stable callback, and loopback.
+Clients then connect to `https://your-domain.example/mcp`; see
+[Claude setup](#claude-setup) and [ChatGPT setup](#chatgpt-setup).
+`MCP_OAUTH_REDIRECT_ALLOWLIST` (comma-separated) admits additional OAuth
+callbacks beyond Claude, ChatGPT's stable callback, and loopback.
 
 A ready-made AWS deployment (one EC2 instance running Bridge, the server,
 and Caddy for TLS, with secrets in SSM Parameter Store) lives in
 [`deploy/aws`](deploy/aws/README.md).
+
+## Claude setup
+
+### Claude Desktop (local, stdio)
+
+Put the JSON block from [Setup](#setup) into Claude Desktop's config file
+and restart the app:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+Proton Mail Bridge must be running on the same machine. The tools appear
+under the tools menu in a new conversation.
+
+### Claude Code (local, stdio)
+
+```sh
+claude mcp add proton-mail --scope user \
+  -e PROTON_USERNAME=your-bridge-username \
+  -e PROTON_PASSWORD=your-bridge-password \
+  -- /path/to/proton-mail-mcp/target/release/proton-mail-mcp
+```
+
+`--scope user` makes the server available in every project; drop it to
+register it for the current project only. Run `/mcp` inside Claude Code to
+confirm it connected. A checked-in `.mcp.json` works too, but keep the
+credentials out of version control (this repo gitignores it).
+
+### claude.ai and Claude Desktop (remote, HTTP + OAuth)
+
+Requires the server to be reachable over HTTPS with the OAuth trio set, for
+example via the [`deploy/aws`](deploy/aws/README.md) stack.
+
+1. Open **Settings → Connectors → Add custom connector** (on claude.ai or in
+   Claude Desktop; connectors are tied to your Claude account, so a connector
+   added in one place is available in the web app, desktop app, and mobile
+   apps).
+2. Name it **Proton Mail** and enter `https://your-domain.example/mcp`.
+   Leave the OAuth client ID and client secret blank; Claude registers itself
+   via dynamic client registration.
+3. Click **Connect**. The server's authorization page opens; enter
+   `MCP_OAUTH_PASSPHRASE` (not your Proton or Bridge password). Tokens
+   refresh automatically from then on.
+4. In a conversation, enable the connector from the tools menu and try:
+   "List my Proton Mail folders."
+
+The server allows the claude.ai and claude.com OAuth callbacks out of the
+box, so no `MCP_OAUTH_REDIRECT_ALLOWLIST` entry is needed. On Team and
+Enterprise plans an admin can instead add the connector once under
+**Admin settings → Connectors** for the whole organization.
+
+### Claude Code (remote, HTTP + OAuth)
+
+```sh
+claude mcp add --transport http --scope user proton-mail https://your-domain.example/mcp
+```
+
+Then start Claude Code, run `/mcp`, select **proton-mail**, and choose
+**Authenticate**. A browser opens on the authorization page; enter the
+passphrase. Claude Code receives the token on a loopback callback
+(`http://localhost:<port>/callback`), which the server allows by default.
+Tokens are stored in your OS keychain and refreshed automatically; rotating
+`MCP_OAUTH_SIGNING_KEY` on the server forces a re-authentication.
 
 ## ChatGPT setup
 

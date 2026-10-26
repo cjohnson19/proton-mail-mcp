@@ -138,12 +138,26 @@ curl -s -o /dev/null -w '%{http_code}\n' https://mail-mcp.example.com/mcp       
 curl -s https://mail-mcp.example.com/.well-known/oauth-protected-resource/mcp | jq  # -> resource metadata
 ```
 
-**Claude:** Settings, Connectors, Add custom connector. Paste the
-`ConnectorUrl` and leave the OAuth fields blank. Claude registers itself,
-opens the authorize page, and you type the passphrase once.
+**claude.ai / Claude Desktop:** Settings, Connectors, Add custom connector.
+Paste the `ConnectorUrl` and leave the OAuth client fields blank. Claude
+registers itself, opens the authorize page, and you type the
+`oauth-passphrase` once. The connector then works on web, desktop, and
+mobile.
 
-**ChatGPT:** see the "ChatGPT" section of the repository README for the
-connector setup. The server already allows ChatGPT's callback URL.
+**Claude Code:**
+
+```bash
+claude mcp add --transport http --scope user proton-mail https://mail-mcp.example.com/mcp
+```
+
+then run `/mcp` inside Claude Code and authenticate; the browser opens the
+same passphrase page.
+
+**ChatGPT:** see the "ChatGPT setup" section of the repository README. The
+server already allows ChatGPT's callback URL.
+
+Full client walkthroughs are in the "Claude setup" and "ChatGPT setup"
+sections of the [repository README](../../README.md).
 
 ## Day-to-day operations
 
