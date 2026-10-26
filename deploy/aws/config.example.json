@@ -1,0 +1,12 @@
+{
+  "account": "123456789012",
+  "region": "us-east-1",
+  "domainName": "mail-mcp.example.com",
+  "hostedZoneName": "example.com",
+  "instanceType": "t3a.micro",
+  "amiId": null,
+  "bridgeImage": "ghcr.io/videocurio/proton-mail-bridge:v3.24.2",
+  "ssmPrefix": "/proton-mail-mcp",
+  "stackName": "MailMcpStack",
+  "oauthRedirectAllowlist": []
+}

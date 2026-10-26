@@ -1,8 +1,9 @@
 target
-infra
+deploy
 tests
 .git
 .github
 .vscode
 *.md
 .mcp.json
+docker-compose.yml

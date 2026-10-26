@@ -68,6 +68,10 @@ the OAuth fields blank; Claude registers itself and opens the passphrase
 page. `MCP_OAUTH_REDIRECT_ALLOWLIST` (comma-separated) admits additional
 OAuth callbacks beyond Claude, ChatGPT's stable callback, and loopback.
 
+A ready-made AWS deployment (one EC2 instance running Bridge, the server,
+and Caddy for TLS, with secrets in SSM Parameter Store) lives in
+[`deploy/aws`](deploy/aws/README.md).
+
 ## ChatGPT setup
 
 ChatGPT connects to the remote `/mcp` endpoint using streamable HTTP and
@@ -80,11 +84,10 @@ The server uses MCP SDK 3.x to support ChatGPT's `2026-07-28`
 HTTP host validation allows loopback and the authority from `MCP_PUBLIC_URL`.
 
 Deploy this version of the server before creating the ChatGPT connection.
-For the companion AWS deployment, run `npx cdk diff` from
-`../proton-mail-mcp-infra`, review the changes, then run `npx cdk deploy`.
-An app-only deployment updates the image without replacing the instance;
-the existing refresh job applies it within 30 minutes. Follow the infra
-runbook to apply it immediately. Check the diff carefully: infrastructure
+With the [`deploy/aws`](deploy/aws/README.md) stack, run `npx cdk diff`,
+review the changes, then `npx cdk deploy`. An app-only deployment updates
+the image without replacing the instance and is applied within 30 minutes
+(or immediately via the runbook). Check the diff carefully: infrastructure
 changes can replace the instance and require a new Bridge login.
 
 1. In ChatGPT, open **Settings → Security and login → Developer mode**.
