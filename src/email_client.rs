@@ -163,6 +163,13 @@ impl From<NameAttribute<'_>> for MailboxAttribute {
             NameAttribute::NoSelect => Self::NoSelect,
             NameAttribute::Marked => Self::Marked,
             NameAttribute::Unmarked => Self::Unmarked,
+            NameAttribute::All => Self::All,
+            NameAttribute::Archive => Self::Archive,
+            NameAttribute::Drafts => Self::Drafts,
+            NameAttribute::Flagged => Self::Flagged,
+            NameAttribute::Junk => Self::Junk,
+            NameAttribute::Sent => Self::Sent,
+            NameAttribute::Trash => Self::Trash,
             NameAttribute::Extension(cow) => {
                 match cow.trim_start_matches('\\').to_ascii_lowercase().as_str() {
                     "all" => Self::All,
@@ -181,6 +188,23 @@ impl From<NameAttribute<'_>> for MailboxAttribute {
     }
 }
 
+impl MailboxAttribute {
+    /// The RFC 6154 special-use tag this attribute denotes, if any.
+    pub fn special_use_tag(&self) -> Option<&'static str> {
+        match self {
+            Self::All => Some("all"),
+            Self::Archive => Some("archive"),
+            Self::Drafts => Some("drafts"),
+            Self::Flagged => Some("flagged"),
+            Self::Junk => Some("junk"),
+            Self::Sent => Some("sent"),
+            Self::Trash => Some("trash"),
+            Self::Important => Some("important"),
+            _ => None,
+        }
+    }
+}
+
 impl From<&Name> for MailboxDescription {
     fn from(value: &Name) -> Self {
         let attributes: Vec<MailboxAttribute> = value
@@ -189,17 +213,10 @@ impl From<&Name> for MailboxDescription {
             .cloned()
             .map(MailboxAttribute::from)
             .collect();
-        let special_use = attributes.iter().find_map(|attr| match attr {
-            MailboxAttribute::All => Some("all".to_owned()),
-            MailboxAttribute::Archive => Some("archive".to_owned()),
-            MailboxAttribute::Drafts => Some("drafts".to_owned()),
-            MailboxAttribute::Flagged => Some("flagged".to_owned()),
-            MailboxAttribute::Junk => Some("junk".to_owned()),
-            MailboxAttribute::Sent => Some("sent".to_owned()),
-            MailboxAttribute::Trash => Some("trash".to_owned()),
-            MailboxAttribute::Important => Some("important".to_owned()),
-            _ => None,
-        });
+        let special_use = attributes
+            .iter()
+            .find_map(MailboxAttribute::special_use_tag)
+            .map(str::to_owned);
         Self {
             name: value.name().to_owned(),
             attributes,
@@ -2606,6 +2623,48 @@ mod tests {
                     || prop.get("$ref").is_some()
                     || prop.get("allOf").is_some(),
                 "ThreadMessage.{field} should have a description"
+            );
+        });
+    }
+
+    #[test]
+    fn special_use_name_attributes_map_to_tags() {
+        let cases = [
+            (NameAttribute::All, "all"),
+            (NameAttribute::Archive, "archive"),
+            (NameAttribute::Drafts, "drafts"),
+            (NameAttribute::Flagged, "flagged"),
+            (NameAttribute::Junk, "junk"),
+            (NameAttribute::Sent, "sent"),
+            (NameAttribute::Trash, "trash"),
+            (NameAttribute::Extension("\\Important".into()), "important"),
+            (NameAttribute::Extension("\\Sent".into()), "sent"),
+        ];
+        cases.into_iter().for_each(|(attr, expected)| {
+            let mapped = MailboxAttribute::from(attr.clone());
+            assert_eq!(
+                mapped.special_use_tag(),
+                Some(expected),
+                "{attr:?} should map to special_use {expected:?}, got {mapped:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn plain_name_attributes_have_no_special_use() {
+        [
+            NameAttribute::NoInferiors,
+            NameAttribute::NoSelect,
+            NameAttribute::Marked,
+            NameAttribute::Unmarked,
+            NameAttribute::Extension("\\HasChildren".into()),
+        ]
+        .into_iter()
+        .for_each(|attr| {
+            assert_eq!(
+                MailboxAttribute::from(attr.clone()).special_use_tag(),
+                None,
+                "{attr:?}"
             );
         });
     }
