@@ -15,7 +15,7 @@ export interface DeployConfig {
 }
 
 const defaults = {
-  instanceType: 't3a.micro',
+  instanceType: 't4g.micro',
   bridgeImage: 'ghcr.io/videocurio/proton-mail-bridge:v3.24.2',
   ssmPrefix: '/proton-mail-mcp',
   stackName: 'MailMcpStack',

@@ -11,7 +11,7 @@ import type { DeployConfig } from './config';
 
 type MailMcpStackProps = cdk.StackProps & Omit<DeployConfig, 'account' | 'region' | 'stackName'>;
 
-const DEBIAN_12_AMI_PARAMETER = '/aws/service/debian/release/12/latest/amd64';
+const DEBIAN_12_AMI_PARAMETER = '/aws/service/debian/release/12/latest/arm64';
 
 export class MailMcpStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: MailMcpStackProps) {
@@ -23,7 +23,7 @@ export class MailMcpStack extends cdk.Stack {
     }
     const image = new DockerImageAsset(this, 'AppImage', {
       directory: appDir,
-      platform: Platform.LINUX_AMD64,
+      platform: Platform.LINUX_ARM64,
     });
 
     const vpc = ec2.Vpc.fromLookup(this, 'DefaultVpc', { isDefault: true });
@@ -167,7 +167,7 @@ echo "refresh done (mcp=\$mcp_changed image=\$image_changed caddy=\$caddy_change
       'set -eux',
       'apt-get update',
       'DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl wget docker.io awscli caddy',
-      'wget -q -O /tmp/ssm.deb https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb',
+      'wget -q -O /tmp/ssm.deb https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_arm64/amazon-ssm-agent.deb',
       'dpkg -i /tmp/ssm.deb',
       'systemctl enable --now amazon-ssm-agent',
       'systemctl enable --now docker',

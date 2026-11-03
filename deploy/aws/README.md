@@ -36,10 +36,13 @@ instance reads them at boot and every 30 minutes afterwards.
 - The **default VPC** in the region (every account has one unless it was
   deleted).
 - AWS CLI v2 logged in, Node.js 20+, and Docker running locally (the app image
-  is built on your machine and pushed to ECR).
+  is built on your machine and pushed to ECR). The image is built for arm64;
+  on an x86 machine Docker needs QEMU emulation enabled (Docker Desktop has it
+  built in, otherwise `docker run --privileged --rm tonistiigi/binfmt --install arm64`),
+  and the Rust build is noticeably slower under emulation.
 - A paid Proton plan. Proton Mail Bridge requires one.
 
-Running cost is roughly USD 10 to 15 per month: a `t3a.micro`, a 16 GB gp3
+Running cost is roughly USD 10 to 15 per month: a `t4g.micro`, a 16 GB gp3
 volume, and one Elastic IP.
 
 ## 1. Configure
@@ -58,8 +61,8 @@ Edit `config.json` (gitignored):
 | `region` | yes | Region to deploy into |
 | `domainName` | yes | Public hostname for the endpoint, e.g. `mail-mcp.example.com` |
 | `hostedZoneName` | yes | The Route 53 zone that contains `domainName`, e.g. `example.com` |
-| `instanceType` | no | Default `t3a.micro`. A larger instance speeds up Bridge's initial mailbox sync; you can change it later without replacing the instance |
-| `amiId` | no | Debian 12 AMI to pin. Leave `null` for the first deploy, then pin it (see below) |
+| `instanceType` | no | Default `t4g.micro`. The stack is arm64 (Graviton), so pick a `g` instance family. A larger instance speeds up Bridge's initial mailbox sync; you can change it later without replacing the instance |
+| `amiId` | no | Debian 12 arm64 AMI to pin. Leave `null` for the first deploy, then pin it (see below) |
 | `bridgeImage` | no | Community Bridge image. Default is pinned to a known-good tag |
 | `ssmPrefix` | no | Parameter Store prefix, default `/proton-mail-mcp` |
 | `stackName` | no | CloudFormation stack name, default `MailMcpStack` |
