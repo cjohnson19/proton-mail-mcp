@@ -30,6 +30,7 @@ rand = "0.10.2"
 subtle = "2.6.1"
 serde_urlencoded = "0.7.1"
 pdf-extract = "0.12"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 [dev-dependencies]
 http-body-util = "0.1.3"

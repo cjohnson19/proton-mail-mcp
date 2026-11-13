@@ -13,6 +13,8 @@ use tokio::net::TcpStream;
 use tokio_native_tls::TlsStream;
 use tracing::{debug, instrument, warn};
 
+use crate::markdown::markdown_to_html;
+
 const FETCH_HEADERS: &str = "(UID FLAGS BODY.PEEK[HEADER])";
 const FETCH_HEADERS_AND_BODY: &str = "(UID FLAGS BODY.PEEK[])";
 const FETCH_THREAD_HEADERS: &str = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])";
@@ -756,8 +758,17 @@ pub struct DraftEmailRequest {
     /// Subject line.
     #[schemars(length(min = 1))]
     pub subject: String,
-    /// Plain-text body.
-    pub body_text: String,
+    /// Message body, interpreted according to `body_format`.
+    #[serde(alias = "body_text")]
+    pub body: String,
+    /// How `body` is interpreted. "markdown" (default) renders the body to
+    /// HTML in Proton Mail's default composer formatting (Arial 14px), with the
+    /// Markdown source kept as the plain-text alternative. Supports bold,
+    /// italic, strikethrough, links, bulleted/numbered lists, blockquotes,
+    /// headings, and code; single newlines are kept as line breaks; raw HTML
+    /// is escaped, not rendered. "plain" saves a text/plain-only draft.
+    #[serde(default)]
+    pub body_format: BodyFormat,
     /// Optional: reply to an existing message. The original's Message-ID and
     /// References headers are fetched and used to set In-Reply-To / References
     /// on the draft so it threads correctly in mail clients.
@@ -766,6 +777,16 @@ pub struct DraftEmailRequest {
     /// Drafts mailbox name. Defaults to "Drafts".
     #[serde(default = "default_drafts_mailbox")]
     pub drafts_mailbox: String,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum BodyFormat {
+    /// Render `body` as Markdown into Proton-styled HTML.
+    #[default]
+    Markdown,
+    /// Save `body` verbatim as plain text.
+    Plain,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1097,12 +1118,16 @@ fn build_draft_rfc5322(
 
     let to_addrs: Vec<Address<'_>> = req.to.iter().map(|s| Address::from(s.as_str())).collect();
 
-    let mut builder = MessageBuilder::new()
+    let builder = MessageBuilder::new()
         .from(Address::from(from))
         .to(Address::new_list(to_addrs))
         .subject(req.subject.as_str())
         .message_id(message_id_inner.as_str())
-        .text_body(req.body_text.as_str());
+        .text_body(req.body.as_str());
+    let mut builder = match req.body_format {
+        BodyFormat::Markdown => builder.html_body(markdown_to_html(&req.body)),
+        BodyFormat::Plain => builder,
+    };
 
     if !req.cc.is_empty() {
         let cc_addrs: Vec<Address<'_>> = req.cc.iter().map(|s| Address::from(s.as_str())).collect();
@@ -2625,6 +2650,83 @@ mod tests {
                 "ThreadMessage.{field} should have a description"
             );
         });
+    }
+
+    fn draft_request(body: &str, body_format: BodyFormat) -> DraftEmailRequest {
+        DraftEmailRequest {
+            from: None,
+            to: vec!["recipient@example.com".into()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Subject".into(),
+            body: body.into(),
+            body_format,
+            in_reply_to: None,
+            drafts_mailbox: "Drafts".into(),
+        }
+    }
+
+    fn built_draft_parts(body: &str, body_format: BodyFormat) -> Vec<(String, String)> {
+        let request = draft_request(body, body_format);
+        let (raw, _) = build_draft_rfc5322("me@example.com", &request, None).unwrap();
+        let parsed = mailparse::parse_mail(&raw).unwrap();
+        std::iter::once(&parsed)
+            .chain(parsed.subparts.iter())
+            .map(|part| (part.ctype.mimetype.clone(), part.get_body().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn markdown_draft_is_multipart_alternative_with_proton_html() {
+        let parts = built_draft_parts("Hello **world**", BodyFormat::Markdown);
+        let mimetypes: Vec<&str> = parts
+            .iter()
+            .map(|(mimetype, _)| mimetype.as_str())
+            .collect();
+        assert_eq!(
+            mimetypes,
+            ["multipart/alternative", "text/plain", "text/html"]
+        );
+        assert_eq!(parts[1].1.trim_end(), "Hello **world**");
+        assert!(
+            parts[2]
+                .1
+                .contains("font-family: Arial, sans-serif; font-size: 14px;"),
+            "html part missing Proton font: {}",
+            parts[2].1
+        );
+        assert!(
+            parts[2]
+                .1
+                .contains("<div>Hello <strong>world</strong></div>")
+        );
+    }
+
+    #[test]
+    fn plain_draft_is_text_only() {
+        let parts = built_draft_parts("Hello **world**", BodyFormat::Plain);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].0, "text/plain");
+        assert_eq!(parts[0].1.trim_end(), "Hello **world**");
+    }
+
+    #[test]
+    fn draft_email_request_schema_and_defaults() {
+        let schema = serde_json::to_value(schemars::schema_for!(DraftEmailRequest)).unwrap();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&Value::from("body")));
+        assert!(!required.contains(&Value::from("body_format")));
+
+        let minimal = serde_json::json!({"to": ["a@example.com"], "subject": "s", "body": "b"});
+        let request: DraftEmailRequest = serde_json::from_value(minimal).unwrap();
+        assert_eq!(request.body_format, BodyFormat::Markdown);
+
+        let legacy = serde_json::json!({
+            "to": ["a@example.com"], "subject": "s", "body_text": "b", "body_format": "plain"
+        });
+        let request: DraftEmailRequest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(request.body, "b");
+        assert_eq!(request.body_format, BodyFormat::Plain);
     }
 
     #[test]

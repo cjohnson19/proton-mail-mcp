@@ -244,7 +244,7 @@ return text with `isError: true` instead of a structured success result.
 | `move_messages` | Move several messages to a different mailbox in one call |
 | `mark_as_read` | Mark a message as read or unread |
 | `set_flagged` | Star or unstar a message |
-| `draft_email` | Save a draft to the Drafts mailbox, optionally as a threaded reply |
+| `draft_email` | Save a draft to the Drafts mailbox, optionally as a threaded reply. The body is Markdown, rendered to HTML in Proton Mail's default formatting (`body_format: "plain"` for text only) |
 
 ## Testing
 

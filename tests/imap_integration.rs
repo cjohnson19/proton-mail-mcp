@@ -1221,7 +1221,8 @@ fn basic_draft_request(to: &str, subject: &str, body: &str) -> DraftEmailRequest
         cc: Vec::new(),
         bcc: Vec::new(),
         subject: subject.into(),
-        body_text: body.into(),
+        body: body.into(),
+        body_format: BodyFormat::default(),
         in_reply_to: None,
         drafts_mailbox: "Drafts".into(),
     }
@@ -1297,6 +1298,107 @@ async fn test_draft_email_basic() {
 }
 
 #[tokio::test]
+async fn test_draft_email_markdown_renders_proton_html() {
+    let user = "draftmarkdown@localhost";
+
+    let mut raw = imap_session(user).await;
+    ensure_mailbox(&mut raw, "Drafts").await;
+    raw.logout().await.ok();
+
+    let mut client = connect_client(user).await;
+    client
+        .draft_email(basic_draft_request(
+            "recipient@example.com",
+            "Markdown draft",
+            "Hi **Sam**,\n\n- first\n- second",
+        ))
+        .await
+        .unwrap();
+
+    let list = client
+        .list_messages(ListMessagesRequest {
+            mailbox_name: "Drafts".into(),
+            limit: 1,
+            before_uid: None,
+            include_snippet: false,
+        })
+        .await
+        .unwrap();
+
+    let full = client
+        .get_message(GetMessageRequest {
+            mailbox_name: "Drafts".into(),
+            uid: list.messages[0].uid,
+            include_html: true,
+            max_body_chars: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        full.body_text
+            .as_deref()
+            .is_some_and(|b| b.contains("Hi **Sam**,")),
+        "plain alternative should be the Markdown source: {:?}",
+        full.body_text
+    );
+    let html = full
+        .body_html
+        .expect("markdown draft should have an HTML part");
+    assert!(
+        html.contains("font-family: Arial, sans-serif; font-size: 14px;"),
+        "missing Proton default font: {html}"
+    );
+    assert!(html.contains("<div>Hi <strong>Sam</strong>,</div>"));
+    assert!(html.contains("<li>first</li>"));
+}
+
+#[tokio::test]
+async fn test_draft_email_plain_format_has_no_html() {
+    let user = "draftplain@localhost";
+
+    let mut raw = imap_session(user).await;
+    ensure_mailbox(&mut raw, "Drafts").await;
+    raw.logout().await.ok();
+
+    let mut client = connect_client(user).await;
+    client
+        .draft_email(DraftEmailRequest {
+            body_format: BodyFormat::Plain,
+            ..basic_draft_request("recipient@example.com", "Plain draft", "Hi **Sam**")
+        })
+        .await
+        .unwrap();
+
+    let list = client
+        .list_messages(ListMessagesRequest {
+            mailbox_name: "Drafts".into(),
+            limit: 1,
+            before_uid: None,
+            include_snippet: false,
+        })
+        .await
+        .unwrap();
+
+    let full = client
+        .get_message(GetMessageRequest {
+            mailbox_name: "Drafts".into(),
+            uid: list.messages[0].uid,
+            include_html: true,
+            max_body_chars: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(full.body_html.is_none(), "got HTML: {:?}", full.body_html);
+    assert!(
+        full.body_text
+            .as_deref()
+            .is_some_and(|b| b.contains("Hi **Sam**"))
+    );
+}
+
+#[tokio::test]
 async fn test_draft_email_reply_threading() {
     let user = "draftreply@localhost";
     let original_msg_id = "<orig-12345@test.example>";
@@ -1336,7 +1438,8 @@ async fn test_draft_email_reply_threading() {
             cc: Vec::new(),
             bcc: Vec::new(),
             subject: "Re: Original subject".into(),
-            body_text: "My reply.".into(),
+            body: "My reply.".into(),
+            body_format: BodyFormat::default(),
             in_reply_to: Some(InReplyTo {
                 mailbox_name: "INBOX".into(),
                 uid: orig_uid,
@@ -1394,7 +1497,8 @@ async fn test_draft_email_from_override() {
             cc: Vec::new(),
             bcc: Vec::new(),
             subject: "From override".into(),
-            body_text: "body".into(),
+            body: "body".into(),
+            body_format: BodyFormat::default(),
             in_reply_to: None,
             drafts_mailbox: "Drafts".into(),
         })

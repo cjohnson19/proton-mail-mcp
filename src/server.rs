@@ -361,7 +361,7 @@ impl ProtonMailService {
 
     #[tool(
         title = "Draft Email",
-        description = "Compose an email and save it to the Drafts mailbox. Supports To/Cc/Bcc, subject, and a plain-text body. Pass in_reply_to (source mailbox + UID) to thread as a reply — the original Message-ID and References are fetched and set on the draft. The draft is NOT sent; the user must review and send it from their mail client.",
+        description = "Compose an email and save it to the Drafts mailbox. Supports To/Cc/Bcc, subject, and a body written in Markdown (default), which is rendered to HTML in Proton Mail's default formatting — use it for bold, italics, links, lists, and quotes; raw HTML is not accepted. Set body_format to \"plain\" for a text-only draft. Pass in_reply_to (source mailbox + UID) to thread as a reply — the original Message-ID and References are fetched and set on the draft. The draft is NOT sent; the user must review and send it from their mail client.",
         annotations(
             read_only_hint = false,
             idempotent_hint = false,
@@ -432,7 +432,7 @@ impl ServerHandler for ProtonMailService {
                 "- Dates in search use DD-Mon-YYYY format (e.g. \"01-Jan-2024\"). `since` is inclusive, `before` is exclusive.\n",
                 "- get_message does not mark messages as read; use mark_as_read separately.\n",
                 "- get_attachment returns `delivery` = \"inline\" (content_base64), \"url\" (download_url, expires in about an hour; give it to the user to download), \"file\" (file_path on the server's machine), or \"text\" (extracted text). Pass delivery=\"text\" to read a PDF/HTML/text attachment, and delivery=\"link\" when the user wants the file rather than its contents.\n",
-                "- draft_email writes to the Drafts mailbox; to reply, pass in_reply_to with the source mailbox and UID. Sending is not supported.",
+                "- draft_email writes to the Drafts mailbox; the body is Markdown rendered to Proton-styled HTML (body_format=\"plain\" for text only). To reply, pass in_reply_to with the source mailbox and UID. Sending is not supported.",
             ))
             .with_server_info(
                 Implementation::new("proton-mail-mcp", env!("CARGO_PKG_VERSION"))
