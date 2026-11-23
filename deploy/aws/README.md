@@ -234,6 +234,11 @@ bootstrap ECR repository; delete them there if you want them gone.
   `/usr/local/bin/mcp-refresh-config`. That script fetches the SSM
   parameters, renders `/etc/proton-mcp/mcp.env` and `/etc/caddy/Caddyfile`,
   and pulls or restarts only what changed, so it is safe to run at any time.
+- The State Manager association also creates and enables a 2 GB swapfile
+  before each refresh. Bridge's memory spikes on large searches, and without
+  swap the kernel kills it while the container keeps reporting healthy. It is
+  set up there rather than in user data so that it never replaces the
+  instance.
 - The instance role can pull from ECR and read parameters under `ssmPrefix`,
   and nothing else.
 - `cdk.context.json` caches the VPC and hosted-zone lookups. It is gitignored

@@ -12,6 +12,7 @@ import type { DeployConfig } from './config';
 type MailMcpStackProps = cdk.StackProps & Omit<DeployConfig, 'account' | 'region' | 'stackName'>;
 
 const DEBIAN_12_AMI_PARAMETER = '/aws/service/debian/release/12/latest/arm64';
+const SWAP_FILE_MB = 2048;
 
 export class MailMcpStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: MailMcpStackProps) {
@@ -210,6 +211,15 @@ echo "refresh done (mcp=\$mcp_changed image=\$image_changed caddy=\$caddy_change
       ],
     });
 
+    // Bridge's memory spikes on large searches, and an OOM kill leaves the
+    // container up with a dead bridge process. Swap lives here rather than in
+    // user data so adding or changing it never replaces the instance.
+    const ensureSwap = [
+      `[ -f /swapfile ] || { dd if=/dev/zero of=/swapfile.tmp bs=1M count=${SWAP_FILE_MB} && chmod 600 /swapfile.tmp && mkswap /swapfile.tmp && mv /swapfile.tmp /swapfile; }`,
+      "grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab",
+      'swapon --noheadings --show=NAME | grep -qx /swapfile || swapon /swapfile',
+    ];
+
     // Rolls out SSM parameter changes (new app image, rotated secrets)
     // without a deploy touching the instance. mcp-refresh-config is
     // change-detecting, so the periodic runs are no-ops between deploys.
@@ -218,7 +228,7 @@ echo "refresh done (mcp=\$mcp_changed image=\$image_changed caddy=\$caddy_change
       name: 'AWS-RunShellScript',
       targets: [{ key: 'InstanceIds', values: [instance.instanceId] }],
       scheduleExpression: 'rate(30 minutes)',
-      parameters: { commands: ['/usr/local/bin/mcp-refresh-config'] },
+      parameters: { commands: [...ensureSwap, '/usr/local/bin/mcp-refresh-config'] },
     });
 
     const eip = new ec2.CfnEIP(this, 'Eip', {
